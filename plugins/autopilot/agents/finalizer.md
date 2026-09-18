@@ -17,6 +17,15 @@ Tu ecris sous l'identite de l'utilisateur. Ici, la qualite du texte compte plus 
 
 ## L'ordre, et il compte
 
+Chaque ecriture recoit `ticketId`. Les tools verifient le plan approuve, le point
+13, les checklists et les checks complets du commit courant. Ne contourne aucun
+refus avec un autre outil ou une ecriture manuelle d'etat.
+
+Reutilise `operationKey` a la reprise : `opening` pour le message Slack,
+`final-summary` pour le commentaire Jira et un identifiant stable pour chaque
+note GitLab. Une operation confirmee ne se republie pas. Un resultat incertain
+demande reconciliation puis escalade, pas une nouvelle cle pour forcer un POST.
+
 1. **`writer-voice-tone`** — avant d'ecrire quoi que ce soit de public. Obligatoire.
 2. **Les N merge requests**, une par repo du scope. `push-branch` puis `create-gitlab-mr`.
 3. **Les references croisees** — une fois les N MR creees, `update-gitlab-mr` sur chacune
@@ -96,3 +105,6 @@ deja accorde.
 
 Les N MR existent et se referencent mutuellement, le canal existe avec ses liens, la
 transition Jira est faite et le commentaire est poste.
+
+Ecris alors `run.phase: done`, puis l'event final. N'ecris jamais done apres une
+seule MR ou un seul message : l'interface ne deduit plus la fin d'un succes partiel.

@@ -32,19 +32,37 @@ export interface Channel {
 }
 
 export async function findChannel(name: string): Promise<Channel | null> {
-  const { data } = await request<{ ok: boolean; channels?: Channel[]; response_metadata?: { next_cursor?: string } }>(
-    `${base()}/conversations.list?types=private_channel,public_channel&limit=1000&exclude_archived=true`,
-    { headers: headers() },
-  );
-  return data?.channels?.find((channel) => channel.name === name) ?? null;
+  let cursor = "";
+  const seen = new Set<string>();
+  do {
+    if (seen.has(cursor)) fail("Pagination Slack circulaire.");
+    seen.add(cursor);
+    const { data } = await request<{ ok: boolean; error?: string; channels?: Channel[]; response_metadata?: { next_cursor?: string } }>(
+      `${base()}/conversations.list?types=private_channel,public_channel&limit=200&exclude_archived=true&cursor=${encodeURIComponent(cursor)}`,
+      { headers: headers() },
+    );
+    if (!data?.ok) fail(`Slack conversations.list a refuse : ${data?.error ?? "reponse illisible"}.`);
+    const channel = data.channels?.find((entry) => entry.name === name);
+    if (channel) return channel;
+    cursor = data.response_metadata?.next_cursor?.trim() ?? "";
+  } while (cursor);
+  return null;
 }
 
 export async function createChannel(name: string): Promise<Channel> {
   const existing = await findChannel(name);
   if (existing) return existing;
   const isPrivate = loadConfig().slack.channelVisibility === "private";
-  const data = await call<{ channel: Channel }>("conversations.create", { name, is_private: isPrivate });
-  return data.channel;
+  try {
+    const data = await call<{ channel: Channel }>("conversations.create", { name, is_private: isPrivate });
+    return data.channel;
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("name_taken")) {
+      const found = await findChannel(name);
+      if (found) return found;
+    }
+    throw error;
+  }
 }
 
 export async function lookupByEmail(email: string): Promise<string | null> {

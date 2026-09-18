@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { loadConfig } from "./config.ts";
 import { fail } from "./errors.ts";
 import { memoryDir } from "./paths.ts";
@@ -99,6 +99,8 @@ export function assertFrontmatter(path: string, frontmatter: Frontmatter): void 
   if (!frontmatter.last_verified || !/^\d{4}-\d{2}-\d{2}$/.test(String(frontmatter.last_verified))) {
     fail(`\`last_verified\` manquant ou mal forme dans ${path}.`, "Format attendu : AAAA-MM-JJ.");
   }
+  const verified = new Date(frontmatter.last_verified);
+  if (!Number.isFinite(verified.getTime()) || verified.toISOString().slice(0, 10) !== frontmatter.last_verified) fail(`Date de verification inexistante dans ${path}.`);
   const expected = SCOPE_DIRECTORIES[frontmatter.scope];
   const top = path.split("/")[0];
   if (top !== expected) {
@@ -159,12 +161,20 @@ export function queryNotes(query: MemoryQuery, root = memoryDir()): Note[] {
 }
 
 export function notePath(relativePath: string, root = memoryDir()): string {
+  if (isAbsolute(relativePath) || relativePath.split(/[\\/]/).includes("..")) fail(`Chemin de note hors de memory/ : ${relativePath}.`);
   const absolute = resolve(root, relativePath);
   const inside = relative(root, absolute);
   if (inside.startsWith("..") || absolute === root) {
     fail(`Chemin de note hors de memory/ : ${relativePath}.`);
   }
   if (!absolute.endsWith(".md")) fail(`Une note de memoire est un fichier .md : ${relativePath}.`);
+  if (existsSync(root)) {
+    let ancestor = absolute;
+    while (!existsSync(ancestor) && dirname(ancestor) !== ancestor) ancestor = dirname(ancestor);
+    const actual = resolve(realpathSync(ancestor), relative(ancestor, absolute));
+    const rel = relative(realpathSync(root), actual);
+    if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) fail(`Lien symbolique hors de memory/ : ${relativePath}.`);
+  }
   return absolute;
 }
 
@@ -198,7 +208,9 @@ function* walk(directory: string): Generator<string> {
   for (const entry of readdirSync(directory)) {
     if (entry === ".git" || entry === "node_modules") continue;
     const absolute = join(directory, entry);
-    if (statSync(absolute).isDirectory()) yield* walk(absolute);
+    const stat = lstatSync(absolute);
+    if (stat.isSymbolicLink()) continue;
+    if (stat.isDirectory()) yield* walk(absolute);
     else yield absolute;
   }
 }

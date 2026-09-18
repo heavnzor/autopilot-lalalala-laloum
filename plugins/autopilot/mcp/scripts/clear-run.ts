@@ -7,6 +7,7 @@ import { liveSessionPath, readLiveSession } from "../lib/events.ts";
 import { autopilotHome, eventsPath, figmaDir, lockPath, ticketStatePath, worktreePath } from "../lib/paths.ts";
 import { readTicketState } from "../lib/store.ts";
 import { normalizeKey } from "../lib/ticket.ts";
+import { receiptPath } from "../lib/receipts.ts";
 
 /**
  * Efface tout l'etat local d'un run pour qu'un ticket reparte de zero.
@@ -148,6 +149,15 @@ if (existsSync(eventsPath(ticket))) removals.push({ what: "journal d'events", pa
 if (existsSync(liveSessionPath(ticket))) removals.push({ what: "session live", path: liveSessionPath(ticket) });
 if (existsSync(figmaDir(ticket))) removals.push({ what: "maquettes rendues", path: figmaDir(ticket) });
 if (existsSync(worktreeRoot)) removals.push({ what: "worktrees", path: worktreeRoot });
+// Les preuves locales doivent etre refaites. Les journaux d'effets distants
+// restent : clear ne doit pas transformer une reprise en double publication.
+const receipts = receiptPath(ticket);
+if (existsSync(receipts)) {
+  for (const entry of readdirSync(receipts)) {
+    if (entry.startsWith("operation-") || entry === "slack-channel.json") continue;
+    removals.push({ what: "preuve locale a renouveler", path: join(receipts, entry) });
+  }
+}
 
 /* Rapport. */
 

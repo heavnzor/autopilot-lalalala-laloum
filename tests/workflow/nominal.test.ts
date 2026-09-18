@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { describe, it } from "node:test";
-import { closeRepo, openRepo, runTests, writeCode, writeTest } from "./cycle.ts";
+import { approvePlan, closeRepo, openRepo, passChecklists, runTests, writeCode, writeTest } from "./cycle.ts";
 import { createSandbox } from "./harness.ts";
 
 function git(cwd: string, args: string[]): string {
@@ -28,13 +28,14 @@ describe("scenario 1 — nominal mono-repo, du ticket a la MR", () => {
         ticketId: "TJ-100",
         patch: {
           ticket: { title: ticket.jira.title, type: "feature", statusAtStart: ticket.jira.status },
-          plan: { approvedAt: new Date().toISOString(), content: "un repo, un test, du code" },
+          plan: { content: "un repo, un test, du code" },
           run: { phase: "implementation", step: "10.1" },
           scope: [{ name: "fixture-core", level: 1, status: "pending" }],
         },
       });
 
       // --- Phase 2, implementation ----------------------------------------
+      await approvePlan(sandbox, "TJ-100", ["fixture-core"]);
       const options = {
         ticketId: "TJ-100",
         repo: "fixture-core",
@@ -65,6 +66,7 @@ describe("scenario 1 — nominal mono-repo, du ticket a la MR", () => {
       assert.equal(green.passed, true, green.stdout.slice(-800));
 
       await closeRepo(sandbox, "TJ-100", "fixture-core");
+      await passChecklists(sandbox, "TJ-100");
 
       // Avant le point 13, rien n'est publie.
       assert.equal(sandbox.gitlab.mergeRequests.length, 0);
@@ -72,6 +74,7 @@ describe("scenario 1 — nominal mono-repo, du ticket a la MR", () => {
       assert.equal(sandbox.jira.transitions.length, 0);
 
       // --- Phase 3, publication --------------------------------------------
+      await sandbox.call("write-store-ticket", { ticketId: "TJ-100", patch: { run: { step: "13", phase: "publication" } } });
       await sandbox.call("push-branch", { ticketId: "TJ-100", repo: "fixture-core" });
       const { title } = await sandbox.call<{ title: string }>("generate-mr-name", {
         type: "feature",
@@ -79,6 +82,7 @@ describe("scenario 1 — nominal mono-repo, du ticket a la MR", () => {
         title: "Ajouter le filtre par periode",
       });
       const mr = await sandbox.call<{ iid: number; url: string; draft: boolean }>("create-gitlab-mr", {
+        ticketId: "TJ-100",
         repo: "fixture-core",
         sourceBranch: branch,
         title,
@@ -92,7 +96,7 @@ describe("scenario 1 — nominal mono-repo, du ticket a la MR", () => {
       });
       assert.equal(channel.name, "tj-100-ajouter-le-filtre-par-periode");
 
-      await sandbox.call("post-slack-message", { channelId: channel.id, text: `La MR est prete :\n${mr.url}` });
+      await sandbox.call("post-slack-message", { ticketId: "TJ-100", channelId: channel.id, text: `La MR est prete :\n${mr.url}` });
       await sandbox.call("transition-jira-ticket", { ticketId: "TJ-100" });
 
       // --- Ce qui doit exister a la fin ------------------------------------

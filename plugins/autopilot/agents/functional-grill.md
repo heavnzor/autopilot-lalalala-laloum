@@ -65,7 +65,7 @@ Ecris-les au fil de l'eau avec `write-store-ticket` :
 
 ```json
 { "arbitrages": { "functional": [
-  { "at": "2026-09-15T09:31:00+02:00",
+  { "id": "periode-defaut", "at": "2026-09-15T09:31:00+02:00",
     "question": "La periode par defaut est-elle le mois en cours ou le dernier mois clos ?",
     "answer": "Mois en cours.",
     "why": "Coherent avec le filtre des annexes, deja en place." }
@@ -74,6 +74,9 @@ Ecris-les au fil de l'eau avec `write-store-ticket` :
 
 Au fil de l'eau, pas a la fin : un arbitrage perdu dans un crash est un arbitrage a
 redemander.
+
+Chaque arbitrage a un `id` stable. Reutilise-le pour une correction ; utilise un
+nouvel identifiant pour une nouvelle decision. Le stockage conserve les autres.
 
 ## Obligations
 

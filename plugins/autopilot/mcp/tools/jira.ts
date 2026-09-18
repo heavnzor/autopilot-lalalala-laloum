@@ -3,6 +3,9 @@ import * as jira from "../lib/jira.ts";
 import { anyValue, obj, str } from "../lib/schema.ts";
 import { patchTicketState } from "../lib/store.ts";
 import { type AnyTool, defineTool } from "../lib/tool.ts";
+import { assertFinalAction } from "../lib/workflow.ts";
+import { publishOnce } from "../lib/operations.ts";
+import { fail } from "../lib/errors.ts";
 
 export const jiraTools: AnyTool[] = [
   defineTool({
@@ -21,6 +24,8 @@ export const jiraTools: AnyTool[] = [
       ["ticketId", "fields"],
     ),
     handler: async ({ ticketId, fields }: { ticketId: string; fields: Record<string, unknown> }) => {
+      await assertFinalAction(ticketId);
+      if (Object.keys(fields).some((key) => !["assignee", "labels"].includes(key))) fail("La finalisation ne modifie que l'assignation et les labels du ticket.");
       await jira.update(ticketId, fields);
       return { updated: true, ticketId, fields: Object.keys(fields) };
     },
@@ -38,8 +43,10 @@ export const jiraTools: AnyTool[] = [
       ["ticketId"],
     ),
     handler: async ({ ticketId, status }: { ticketId: string; status?: string }) => {
+      await assertFinalAction(ticketId);
       const squad = squadOf(ticketId);
-      const target = status ?? resolveBySquad(loadConfig().jira.transitions, squad).apresMr;
+      const target = resolveBySquad(loadConfig().jira.transitions, squad).apresMr;
+      if (status && status.trim().toLowerCase() !== target.trim().toLowerCase()) fail("La transition doit correspondre au statut configure pour la squad.");
       const applied = await jira.transition(ticketId, target);
       const at = new Date().toISOString();
       patchTicketState(ticketId, { publication: { jiraTransition: { to: applied.name, at } } });
@@ -51,9 +58,10 @@ export const jiraTools: AnyTool[] = [
     name: "create-jira-comment",
     description:
       "Ajoute un commentaire au ticket. Sert a republier les questions arbitrees au functional-grill, pour que la decision vive la ou l'equipe la cherchera. Le texte passe d'abord par writer-voice-tone.",
-    inputSchema: obj({ ticketId: str("Cle Jira."), body: str("Corps du commentaire, en francais.") }, ["ticketId", "body"]),
-    handler: async ({ ticketId, body }: { ticketId: string; body: string }) => {
-      const created = await jira.comment(ticketId, body);
+    inputSchema: obj({ ticketId: str("Cle Jira."), operationKey: str("Identifiant stable du commentaire. Defaut : final-summary, conserve lors des reprises."), body: str("Corps du commentaire, en francais.") }, ["ticketId", "body"]),
+    handler: async ({ ticketId, operationKey, body }: { ticketId: string; operationKey?: string; body: string }) => {
+      await assertFinalAction(ticketId);
+      const created = await publishOnce(ticketId, `jira-comment:${operationKey ?? "final-summary"}`, { body }, () => jira.comment(ticketId, body));
       return { commented: true, id: created?.id ?? null };
     },
   }),

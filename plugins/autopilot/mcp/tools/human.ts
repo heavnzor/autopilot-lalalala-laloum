@@ -18,6 +18,7 @@ import { anyValue, arr, enumOf, num, obj, str } from "../lib/schema.ts";
 import { patchTicketState, readTicketState } from "../lib/store.ts";
 import { type AnyTool, type ToolContext, defineTool } from "../lib/tool.ts";
 import { LIVE_EVENT_KINDS, LIVE_EVENT_STATUSES } from "../lib/events.ts";
+import { assertPlanReady, fingerprint, planFingerprint, recordPlanApproval } from "../lib/workflow.ts";
 
 /** Les causes d'escalade. Ce qui n'est pas dans cette liste vaut `convergence`. */
 const CAUSES = ["convergence", "environment", "arbitrage"];
@@ -112,7 +113,7 @@ export const humanTools: AnyTool[] = [
       // et on partait poser les questions dans le vide avant de se replier en
       // silence. On demande donc a l'app, pas au fichier.
       const batchId = `q-${input.ticketId}-${Date.now().toString(36)}`;
-      if (session && (await isAlive(session.url))) {
+      if (session && (await isAlive(session.url, input.ticketId))) {
         const answers = await askLiveShell(
           session.url,
           { id: batchId, questions, askedBy: input.askedBy ?? null },
@@ -218,6 +219,16 @@ export const humanTools: AnyTool[] = [
         }));
       if (repos.length === 0) fail("`repos` est vide.", "Un plan sans depot n'est pas un plan.");
 
+      const state = assertPlanReady(input.ticketId);
+      const planned = (state.plan.repos as Record<string, unknown>[]).map((entry) => ({
+        repo: entry.repo,
+        level: typeof entry.level === "number" ? entry.level : null,
+        changes: Array.isArray(entry.changes) ? entry.changes.map(String).map((change) => change.trim()).filter(Boolean) : [],
+        why: typeof entry.why === "string" ? entry.why.trim() || null : null,
+      }));
+      if (fingerprint(planned) !== fingerprint(repos)) fail("Le plan affiche doit etre exactement plan.repos dans l'etat du ticket.");
+      const submittedFingerprint = planFingerprint(state);
+
       const asked = new Date().toISOString();
       const session = readLiveSession(input.ticketId);
       const planId = `p-${input.ticketId}-${Date.now().toString(36)}`;
@@ -235,14 +246,14 @@ export const humanTools: AnyTool[] = [
 
       // Transport 1 : le live shell, quand il tourne vraiment. Meme pouls que
       // pour un lot de questions : on attend tant que la page peut repondre.
-      if (session && (await isAlive(session.url))) {
+      if (session && (await isAlive(session.url, input.ticketId))) {
         const decision = await decideInLiveShell(
           session.url,
           { id: planId, repos, note: input.note?.trim() || null, askedBy: input.askedBy ?? null },
           context.heartbeat,
         );
         if (decision) {
-          await finishPlan(input.ticketId, input.askedBy ?? null, decision, "live");
+          await finishPlan(input.ticketId, input.askedBy ?? null, decision, "live", submittedFingerprint);
           return { ...decision, transport: "live", askedAt: asked };
         }
         await withdrawFromLiveShell(session.url, planId);
@@ -268,7 +279,7 @@ export const humanTools: AnyTool[] = [
               note: "Un plan renvoye sans dire ce qui cloche repart sur la meme hypothese. Redemande le verdict avec sa raison.",
             };
           }
-          await finishPlan(input.ticketId, input.askedBy ?? null, decision, "terminal");
+          await finishPlan(input.ticketId, input.askedBy ?? null, decision, "terminal", submittedFingerprint);
           return { ...decision, transport: "terminal", askedAt: asked };
         }
         return {
@@ -285,7 +296,7 @@ export const humanTools: AnyTool[] = [
         verdict: null,
         transport: "caller",
         repos,
-        note: "Aucun canal direct disponible. Soumets ce plan tel quel a l'humain et attends `approve`, `amend` ou `reject` avant de poursuivre.",
+        note: "Aucun canal direct disponible. Affiche le plan puis lance le live shell et rappelle ask-plan-approval. Seule une reponse via le shell ou l'elicitation MCP produit la preuve necessaire a la publication.",
       };
     },
   }),
@@ -345,7 +356,9 @@ export const humanTools: AnyTool[] = [
         at,
         cause,
         note:
-          "Rien n'est publie : ni MR, ni canal, ni transition. Les commits et les tags deja poses restent en place. Relancer /autopilot-start reprendra ici." +
+          (String(input.step).startsWith("13")
+            ? "La publication peut avoir reussi partiellement. Relis l'etat et les journaux d'operations avant de reprendre ; ne duplique aucun effet distant."
+            : "Rien n'est publie au point 13 : les commits et tags amont deja poses restent en place. Relancer /autopilot-start reprendra ici.") +
           (cause === "environment"
             ? " Cause `environment` : les compteurs de boucle ne doivent pas avoir bouge, la reprise repart avec le meme budget."
             : ""),
@@ -360,7 +373,7 @@ export const humanTools: AnyTool[] = [
     inputSchema: obj({ ticketId: str("Cle Jira."), runId: str("Identifiant du run.") }, ["ticketId", "runId"]),
     handler: async ({ ticketId, runId }: { ticketId: string; runId: string }) => {
       const existing = readLiveSession(ticketId);
-      if (existing && (await isAlive(existing.url))) {
+      if (existing && (await isAlive(existing.url, ticketId))) {
         return { launched: false, reused: true, url: existing.url, runId: existing.runId };
       }
 
@@ -747,10 +760,13 @@ function formatQuestions(questions: { header: string; question: string; options:
     .join("\n\n");
 }
 
-async function isAlive(url: string): Promise<boolean> {
+async function isAlive(url: string, expectedTicket?: string): Promise<boolean> {
   try {
     const response = await fetch(`${url}/rpc/health`, { signal: AbortSignal.timeout(1500) });
-    return response.ok;
+    if (!response.ok) return false;
+    if (!expectedTicket) return true;
+    const body = await response.json() as { ticketId?: string };
+    return body.ticketId?.toUpperCase() === expectedTicket.toUpperCase();
   } catch {
     return false;
   }
@@ -879,10 +895,11 @@ async function finishPlan(
   agent: string | null,
   decision: { verdict: "approve" | "amend" | "reject"; note: string },
   transport: string,
+  submittedFingerprint: string,
 ): Promise<void> {
   patchTicketState(ticketId, { metrics: { humanInterventions: { __increment: 1 } } });
   if (decision.verdict === "approve") {
-    patchTicketState(ticketId, { plan: { approvedAt: new Date().toISOString() } });
+    recordPlanApproval(ticketId, submittedFingerprint, transport);
   }
   const said = { approve: "Plan approuve", amend: "Plan a amender", reject: "Plan rejete" }[decision.verdict];
   await record(ticketId, {

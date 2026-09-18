@@ -1,0 +1,6 @@
+packages:
+  - tools/live-shell
+
+onlyBuiltDependencies:
+  - esbuild
+  - lightningcss

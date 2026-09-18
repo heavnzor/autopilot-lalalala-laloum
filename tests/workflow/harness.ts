@@ -29,7 +29,7 @@ export interface Sandbox {
   readonly jira: FakeJira;
   readonly slack: FakeSlack;
   readonly gitlab: FakeGitLab;
-  call<T = any>(tool: string, input?: Record<string, unknown>): Promise<T>;
+  call<T = any>(tool: string, input?: Record<string, unknown>, context?: ToolContext): Promise<T>;
   /** Appelle un tool en s'attendant a un echec, et rend le message. */
   expectFailure(tool: string, input?: Record<string, unknown>): Promise<string>;
   repo(name: string): FixtureRepo;
@@ -92,11 +92,11 @@ export async function createSandbox(options: SandboxOptions = {}): Promise<Sandb
     writeFileSync(absolute, serializeNote(note.frontmatter, note.body), "utf8");
   }
 
-  async function call<T>(name: string, input: Record<string, unknown> = {}): Promise<T> {
+  async function call<T>(name: string, input: Record<string, unknown> = {}, context: ToolContext = TEST_CONTEXT): Promise<T> {
     const tool = toolByName(name);
     if (!tool) throw new Error(`Tool inconnu : ${name}. Connus : ${ALL_TOOLS.map((t) => t.name).join(", ")}`);
     validate(tool.inputSchema, input, name);
-    return (await tool.handler(input, TEST_CONTEXT)) as T;
+    return (await tool.handler(input, context)) as T;
   }
 
   return {

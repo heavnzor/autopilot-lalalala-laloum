@@ -1,7 +1,8 @@
 import type { JsonSchema } from "./schema.ts";
 
 /**
- * Un tool est deterministe, testable en eval, et ne consomme pas de contexte.
+ * Un tool est deterministe et testable. Son schema et sa sortie consomment du
+ * contexte, mais sa procedure n'a plus a etre reinvente par un agent.
  * La regle qui decide : toute action faite a chaque run de facon constante est
  * un tool, pas une instruction d'agent.
  */

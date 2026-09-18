@@ -1,6 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { loadConfig } from "../lib/config.ts";
 import { fail } from "../lib/errors.ts";
 import { getTicket as fetchJira } from "../lib/jira.ts";
 import { lockPath } from "../lib/paths.ts";
@@ -37,7 +36,6 @@ export const stateTools: AnyTool[] = [
         fail("`patch` doit etre un objet.", "Un patch est un fragment d'etat, pas une valeur isolee.");
       }
       guardStep(patch);
-      guardBudgets(ticketId, patch);
       const merged = patchTicketState(ticketId, patch);
       return { written: true, state: merged };
     },
@@ -103,11 +101,17 @@ export const stateTools: AnyTool[] = [
     name: "release-ticket-lock",
     description:
       "Libere le lock de run d'un ticket. A appeler a la fin du run, y compris apres une escalade : un lock oublie bloque la reprise.",
-    inputSchema: obj({ ticketId: str("Cle Jira.") }, ["ticketId"]),
-    handler: ({ ticketId }: { ticketId: string }) => {
+    inputSchema: obj({ ticketId: str("Cle Jira."), runId: str("Identifiant du run detenteur, s'il est connu.") }, ["ticketId"]),
+    handler: ({ ticketId, runId }: { ticketId: string; runId?: string }) => {
       const path = lockPath(ticketId);
       const existed = existsSync(path);
-      if (existed) rmSync(path);
+      if (existed) {
+        const raw = safeRead(path);
+        let holder: { pid?: number; runId?: string };
+        try { holder = JSON.parse(raw); } catch { return fail("Verrou illisible : liberation refusee."); }
+        if ((runId && holder.runId !== runId) || (holder.pid !== process.pid && !deadHolder(raw))) fail("Ce verrou appartient a un autre run actif.");
+        rmSync(path);
+      }
       return { released: existed, ticketId };
     },
   }),
@@ -160,7 +164,7 @@ export { ticketStateExists };
  * curseur qu'on ne peut pas comparer. On refuse ici, ou l'erreur est encore
  * corrigeable par celui qui l'a faite.
  */
-const STEP_VALUE = /^([1-9]|1[0-3])(\.\d+)?$/;
+const STEP_VALUE = /^(?:[1-9]|10(?:\.[1-7])?|11|12|13)$/;
 
 function guardStep(patch: Json): void {
   const run = (patch as { run?: unknown }).run;
@@ -175,65 +179,4 @@ function guardStep(patch: Json): void {
     `\`run.step\` vaut ${JSON.stringify(step)}, ce qui n'est pas un numero de point.`,
     "Ecris le point seul — `4`, ou `10.4` pour une sous-etape du cycle d'implementation. Ce que fait l'etape se dit dans le `title` de ton event, pas dans le curseur.",
   );
-}
-
-/**
- * Un compteur de boucle ne depasse pas son budget. Jamais.
- *
- * Le plafond etait une consigne de prompt, et une consigne de prompt se rate :
- * sur FT-1042, `redChecker` est monte a 4 pour un budget de 3, puis le run
- * s'est arrete en annoncant « budgets epuises » — un diagnostic faux, puisque
- * les tours supplementaires n'avaient rien converge, ils avaient seulement ete
- * debites. Le compteur est de l'etat : c'est ici qu'il se defend.
- *
- * Le refus arrive AVANT l'ecriture. L'orchestrateur reprend donc la main avec
- * un compteur intact et une seule issue, celle qu'il aurait du prendre tout
- * seul : `escalate-to-human`.
- */
-function guardBudgets(ticketId: string, patch: Json): void {
-  const entries = (patch as { scope?: unknown }).scope;
-  if (!Array.isArray(entries)) return;
-
-  const budgets = loadConfig().budgets as unknown as Record<string, number | undefined>;
-  const state = readTicketState(ticketId);
-  const base = Array.isArray((state as { scope?: unknown } | null)?.scope)
-    ? ((state as { scope: Json[] }).scope as Json[])
-    : [];
-
-  for (const entry of entries) {
-    if (!isObject(entry)) continue;
-    const loops = entry.loops;
-    if (!isObject(loops)) continue;
-
-    const name = typeof entry.name === "string" ? entry.name : typeof entry.repo === "string" ? entry.repo : null;
-    const current = base.find(
-      (candidate) => isObject(candidate) && (candidate.name === name || candidate.repo === name),
-    );
-    const currentLoops = isObject(current) && isObject(current.loops) ? current.loops : {};
-
-    for (const [loop, value] of Object.entries(loops)) {
-      const budget = budgets[loop];
-      if (typeof budget !== "number") continue;
-
-      const before = typeof currentLoops[loop] === "number" ? (currentLoops[loop] as number) : 0;
-      const after = nextCount(before, value);
-      if (after === null || after <= budget) continue;
-
-      fail(
-        `\`${loop}\` passerait a ${after} sur ${name ?? "ce repo"}, pour un budget de ${budget}.`,
-        "Le budget est atteint : ce tour ne s'ouvre pas. Appelle `escalate-to-human` avec le detail de ce qui n'a pas converge. " +
-          "Si la boucle s'est arretee sans rendre de verdict — environnement, harnais de test, sortie illisible — elle ne se debite pas : n'incremente rien et escalade avec `cause: environment`.",
-      );
-    }
-  }
-}
-
-function nextCount(before: number, value: Json): number | null {
-  if (typeof value === "number") return value;
-  if (isObject(value) && typeof value.__increment === "number") return before + value.__increment;
-  return null;
-}
-
-function isObject(value: unknown): value is { [key: string]: Json } {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

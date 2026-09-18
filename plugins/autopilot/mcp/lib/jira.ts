@@ -65,6 +65,10 @@ export async function getTransitions(key: string): Promise<{ id: string; name: s
 }
 
 export async function transition(key: string, targetStatus: string): Promise<{ id: string; name: string }> {
+  const current = await getTicket(key);
+  if (current.status.trim().toLowerCase() === targetStatus.trim().toLowerCase()) {
+    return { id: "already-applied", name: current.status };
+  }
   const available = await getTransitions(key);
   const wanted = available.find((t) => t.name.trim().toLowerCase() === targetStatus.trim().toLowerCase());
   if (!wanted) {

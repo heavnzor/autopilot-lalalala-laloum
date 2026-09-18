@@ -50,6 +50,7 @@ repositories:
       e2e: null
     reports:
       lint: "{apps,packages}/*/code-quality.json"
+    withoutTests: true
     ciJobsToWatch: []
     description: Fixture dont le lint redirige son rapport dans un fichier.
     keywords: [fixture]
@@ -74,6 +75,7 @@ repositories:
       e2e: null
     ciJobsToWatch: []
     description: Fixture dont le lint parle sur sa sortie, comme eslint.
+    withoutTests: true
     keywords: [fixture]
 
   - name: docker-fixture

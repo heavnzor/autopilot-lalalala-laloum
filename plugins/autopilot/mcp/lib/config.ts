@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { validateConfig, validateRegistry } from "./config-schema.ts";
 import { fail } from "./errors.ts";
 import { expandTilde, projectRoot } from "./paths.ts";
 import { parseYaml } from "./yaml.ts";
@@ -124,7 +125,7 @@ export interface AutopilotConfig {
   };
   readonly timeouts: {
     readonly ciPipelineSeconds: number;
-    readonly askUserSeconds: number;
+    readonly askUserSeconds?: number;
     readonly repoSetupSeconds: number;
     readonly commandSeconds: number;
     /** Silence tolere avant abandon, plafond global mis a part. */
@@ -152,7 +153,7 @@ export interface AutopilotConfig {
    */
   readonly git?: {
     readonly committer?: { readonly name: string; readonly email: string };
-  };
+  } | null;
   readonly gitlab: {
     readonly mrDraft: boolean;
     readonly mrDescriptionLanguage: string;
@@ -169,6 +170,7 @@ export interface AutopilotConfig {
     readonly invitees: SquadIndexed<readonly string[]>;
   };
   readonly liveMode: { readonly portRange: readonly [number, number]; readonly openBrowser: boolean };
+  readonly limits?: { readonly commandOutputBytes?: number };
 }
 
 /**
@@ -189,17 +191,24 @@ export function loadConfig(): AutopilotConfig {
   if (configCache) return configCache;
   const raw = readOrFail("autopilot.yaml");
   const parsed = parseYaml<AutopilotConfig>(raw);
+  validateConfig(parsed);
   if (parsed?.schemaVersion !== 1) {
     fail(`autopilot.yaml : schemaVersion ${String(parsed?.schemaVersion)} inconnue, attendu 1.`);
   }
-  configCache = parsed;
-  return parsed;
+  if (parsed.liveMode.portRange[0] >= parsed.liveMode.portRange[1]) fail("La plage de ports doit etre croissante.");
+  configCache = {
+    ...parsed,
+    budgets: { ...parsed.budgets, developerBatchLines: parsed.budgets.developerBatchLines ?? 4 },
+    timeouts: { ...parsed.timeouts, commandSilenceSeconds: parsed.timeouts.commandSilenceSeconds ?? 240, containerStartSeconds: parsed.timeouts.containerStartSeconds ?? 180, imagePullSeconds: parsed.timeouts.imagePullSeconds ?? 600 },
+  };
+  return configCache;
 }
 
 export function loadRegistry(): Registry {
   if (registryCache) return registryCache;
   const raw = readOrFail("repositories.yaml");
   const parsed = parseYaml<Registry>(raw);
+  validateRegistry(parsed);
   if (parsed?.schemaVersion !== 1) {
     fail(`repositories.yaml : schemaVersion ${String(parsed?.schemaVersion)} inconnue, attendu 1.`);
   }
@@ -224,7 +233,7 @@ export function findRepo(name: string): RepoEntry {
 }
 
 export function repoRoot(repo: RepoEntry): string {
-  return expandTilde(repo.path);
+  return resolve(projectRoot(), expandTilde(repo.path));
 }
 
 /** Ordre de traitement : amont vers aval, `level` croissant, nom en depart d'egalite. */
@@ -306,8 +315,8 @@ function readOrFail(name: string): string {
   for (const candidate of [join(root, name), join(root, name.replace(/\.yaml$/, ".example.yaml"))]) {
     try {
       return readFileSync(candidate, "utf8");
-    } catch {
-      // Fichier suivant.
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
   }
   return fail(
@@ -330,7 +339,15 @@ export function configPathOf(name: "autopilot.yaml" | "repositories.yaml"): stri
  */
 function assertRegistryCoherent(registry: Registry): void {
   const byName = new Map(registry.repositories.map((r) => [r.name, r]));
+  if (byName.size !== registry.repositories.length) fail("repositories.yaml : noms de depots dupliques.");
+  for (const name of registry.evalOnly.repos) if (!byName.has(name)) fail(`Repo d'eval inconnu : ${name}.`);
   for (const repo of registry.repositories) {
+    const hasTests = ["ut", "it", "ft", "ct", "e2e"].some((kind) => repo.commands[kind as CommandKind]);
+    if (!hasTests && !repo.withoutTests) fail(`${repo.name} ne declare aucun test.`, "Declare withoutTests: true si ce choix est intentionnel.");
+    if (hasTests && repo.withoutTests) fail(`${repo.name} declare a la fois des tests et withoutTests: true.`);
+    for (const [kind, template] of Object.entries(repo.targeting ?? {})) {
+      if (template !== null && !template?.includes("{paths}") && !template?.includes("{glob}")) fail(`${repo.name}.${kind} : gabarit de ciblage sans emplacement.`);
+    }
     for (const upstream of repo.dependsOn ?? []) {
       const target = byName.get(upstream);
       if (!target) {

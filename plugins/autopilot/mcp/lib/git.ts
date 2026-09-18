@@ -100,8 +100,28 @@ function nearestPackageName(repoRootPath: string, file: string): string | null {
 /** `--filter=` pour turbo, `--scope=` pour lerna. Rien pour un repo simple. */
 export function filterFlags(repo: RepoEntry, packages: readonly string[]): string {
   if (!repo.monorepoTool || packages.length === 0) return "";
+  for (const name of packages) {
+    if (!/^(?:@[A-Za-z0-9][A-Za-z0-9._-]*\/)?[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) {
+      fail(`Nom de paquet invalide : ${name}.`, "Passe des noms de paquets, jamais une expression shell.");
+    }
+  }
   const flag = repo.monorepoTool === "turbo" ? "--filter" : "--scope";
-  return packages.map((name) => `${flag}=${name}`).join(" ");
+  return [...new Set(packages)].map((name) => `${flag}=${name}`).join(" ");
+}
+
+/** Compatibilite avec les anciens appels, avec une grammaire fermee. */
+export function commandFilter(repo: RepoEntry, input: { filter?: string; packages?: readonly string[] }): string {
+  if (input.filter && input.packages?.length) fail("Utilise `packages` ou `filter`, pas les deux.");
+  if (!repo.monorepoTool && (input.filter?.trim() || input.packages?.length)) {
+    fail(`${repo.name} n'est pas un monorepo : aucun filtre de paquets n'est admis.`);
+  }
+  if (!input.filter?.trim()) return filterFlags(repo, input.packages ?? []);
+  const prefix = repo.monorepoTool === "turbo" ? "--filter=" : "--scope=";
+  const packages = input.filter.trim().split(/\s+/).map((flag) => {
+    if (!flag.startsWith(prefix)) fail(`Filtre invalide : ${flag}.`, `Seuls les ${prefix}<paquet> sont acceptes.`);
+    return flag.slice(prefix.length);
+  });
+  return filterFlags(repo, packages);
 }
 
 export function installCommand(repo: RepoEntry): string {

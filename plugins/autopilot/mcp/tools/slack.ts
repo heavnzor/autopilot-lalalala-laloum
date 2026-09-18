@@ -4,6 +4,9 @@ import * as slack from "../lib/slack.ts";
 import { arr, obj, str } from "../lib/schema.ts";
 import { patchTicketState } from "../lib/store.ts";
 import { type AnyTool, defineTool } from "../lib/tool.ts";
+import { assertFinalAction, assertTicketChannel } from "../lib/workflow.ts";
+import { publishOnce } from "../lib/operations.ts";
+import { receiptPath, writeReceipt } from "../lib/receipts.ts";
 
 export const slackTools: AnyTool[] = [
   defineTool({
@@ -26,10 +29,12 @@ export const slackTools: AnyTool[] = [
       ["ticketId"],
     ),
     handler: async (input: { ticketId: string; title?: string; name?: string }) => {
+      await assertFinalAction(input.ticketId);
       const name = input.name
         ? slackChannelName({ ticket: input.name, titre: "" })
         : slackChannelName({ ticket: input.ticketId, titre: input.title ?? "" });
       const channel = await slack.createChannel(name);
+      writeReceipt(receiptPath(input.ticketId, "slack-channel.json"), channel);
       patchTicketState(input.ticketId, { publication: { slackChannel: { id: channel.id, name: channel.name } } });
       return { id: channel.id, name: channel.name };
     },
@@ -51,6 +56,7 @@ export const slackTools: AnyTool[] = [
       ["ticketId", "channelId"],
     ),
     handler: async (input: { ticketId: string; channelId: string; emails?: string[] }) => {
+      await assertTicketChannel(input.ticketId, input.channelId);
       const allowlist = slack.inviteesFor(input.ticketId);
       const allowed = new Set(allowlist.emails.map((email) => email.toLowerCase()));
 
@@ -73,7 +79,10 @@ export const slackTools: AnyTool[] = [
         else unknown.push(email);
       }
 
-      await slack.invite(input.channelId, resolved.map((entry) => entry.userId));
+      if (resolved.length > 0) await publishOnce(input.ticketId, `slack-invite:${input.channelId}`, { users: resolved.map((entry) => entry.userId).sort() }, async () => {
+        await slack.invite(input.channelId, resolved.map((entry) => entry.userId));
+        return { invited: true };
+      });
       patchTicketState(input.ticketId, {
         publication: { slackChannel: { invited: resolved.map((entry) => entry.email) } },
       });
@@ -94,15 +103,16 @@ export const slackTools: AnyTool[] = [
     name: "post-slack-message",
     description:
       "Poste un message dans un canal, sous l'identite de l'utilisateur. Le texte doit avoir ete ecrit avec writer-voice-tone : un message qui sent l'automatisation est pire qu'un message absent.",
-    inputSchema: obj({ channelId: str("Identifiant du canal."), text: str("Texte du message.") }, ["channelId", "text"]),
-    handler: async ({ channelId, text }: { channelId: string; text: string }) => {
+    inputSchema: obj({ ticketId: str("Cle Jira."), operationKey: str("Identifiant stable du message. Defaut : opening, conserve lors des reprises."), channelId: str("Identifiant du canal."), text: str("Texte du message.") }, ["ticketId", "channelId", "text"]),
+    handler: async ({ ticketId, operationKey, channelId, text }: { ticketId: string; operationKey?: string; channelId: string; text: string }) => {
+      await assertTicketChannel(ticketId, channelId);
       if (/@autopilot/i.test(text)) {
         fail(
           "Le marqueur @autopilot est interdit dans un message publie.",
           "C'est le marqueur par lequel l'utilisateur s'adresse a l'autopilot. L'ecrire, c'est se repondre a soi-meme en boucle dans un fil public.",
         );
       }
-      return slack.postMessage(channelId, text);
+      return publishOnce(ticketId, `slack-message:${channelId}:${operationKey ?? "opening"}`, { text }, () => slack.postMessage(channelId, text));
     },
   }),
 
@@ -110,12 +120,16 @@ export const slackTools: AnyTool[] = [
     name: "create-slack-bookmark",
     description: "Pose une marque page sur le canal : le ticket Jira, chacune des MR, la preview quand il y en a une.",
     inputSchema: obj(
-      { channelId: str("Identifiant du canal."), title: str("Libelle de la marque page."), link: str("URL.") },
-      ["channelId", "title", "link"],
+      { ticketId: str("Cle Jira."), channelId: str("Identifiant du canal."), title: str("Libelle de la marque page."), link: str("URL.") },
+      ["ticketId", "channelId", "title", "link"],
     ),
-    handler: async ({ channelId, title, link }: { channelId: string; title: string; link: string }) => {
-      await slack.addBookmark(channelId, title, link);
-      return { added: true, title, link };
+    handler: async ({ ticketId, channelId, title, link }: { ticketId: string; channelId: string; title: string; link: string }) => {
+      await assertTicketChannel(ticketId, channelId);
+      if (!/^https?:\/\//i.test(link)) fail("Un marque-page doit etre une URL HTTP(S).");
+      return publishOnce(ticketId, `slack-bookmark:${channelId}:${link}`, { title, link }, async () => {
+        await slack.addBookmark(channelId, title, link);
+        return { added: true, title, link };
+      });
     },
   }),
 ];

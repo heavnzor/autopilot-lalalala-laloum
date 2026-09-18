@@ -11,6 +11,9 @@
 
 schemaVersion: 1
 
+limits:
+  commandOutputBytes: 8388608        # 8 MiB : arrete un runner qui inonde la sortie
+
 budgets:                             # nombre de tours avant escalade
   testAdversary: 3                   # 10.2 -> 10.1
   redChecker: 3                      # 10.3 -> 10.1

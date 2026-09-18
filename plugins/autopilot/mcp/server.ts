@@ -26,7 +26,7 @@ import { reapLiveShells } from "./tools/human.ts";
  */
 
 const server = new Server(
-  { name: "autopilot", version: "2.0.0" },
+  { name: "autopilot", version: "2.1.0" },
   { capabilities: { tools: {} } },
 );
 
@@ -147,7 +147,9 @@ function shutdown(code: number): void {
   reapLiveShells();
   // On laisse partir les SIGTERM avant de quitter : sortir dans la foulee
   // laisserait les groupes vivants une poignee de millisecondes de trop.
-  setTimeout(() => process.exit(code), 300).unref();
+  // Le kill des commandes passe a SIGKILL apres deux secondes. Sortir avant
+  // annulerait ce dernier recours et laisserait survivre les processus sourds.
+  setTimeout(() => process.exit(code), 2_300);
 }
 
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {

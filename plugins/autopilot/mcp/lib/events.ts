@@ -11,7 +11,10 @@ import {
 import { Agent, request as httpRequest } from "node:http";
 import { dirname, join } from "node:path";
 import * as v from "valibot";
-import { autopilotHome, eventsPath } from "./paths.ts";
+import { autopilotHome, eventsPath, ticketKey } from "./paths.ts";
+import { LiveEventSchema, type LiveEvent } from "../../../../shared/events.ts";
+export { LiveEventSchema, LIVE_EVENT_KINDS, LIVE_EVENT_STATUSES } from "../../../../shared/events.ts";
+export type { LiveEvent, JsonValue } from "../../../../shared/events.ts";
 
 /**
  * Un seul format d'event pour tout le monde. Un event qu'on ne sait pas valider
@@ -24,53 +27,6 @@ import { autopilotHome, eventsPath } from "./paths.ts";
  * il doit donc etre serialisable. `unknown` laissait passer une Date ou une Map,
  * qui arrivaient cassees de l'autre cote sans que rien ne le dise.
  */
-export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
-
-export const LIVE_EVENT_KINDS = [
-  "step",
-  "agent",
-  "tool",
-  "loop",
-  "todo",
-  "question",
-  "answer",
-  "plan",
-  "decision",
-  "escalation",
-  "message",
-] as const;
-
-export const LIVE_EVENT_STATUSES = ["start", "progress", "ok", "ko", "waiting"] as const;
-
-export const LiveEventSchema = v.object({
-  runId: v.pipe(v.string(), v.minLength(1)),
-  ticketId: v.pipe(v.string(), v.minLength(1)),
-  seq: v.pipe(v.number(), v.integer(), v.minValue(0)),
-  ts: v.pipe(v.string(), v.isoTimestamp()),
-  kind: v.picklist(LIVE_EVENT_KINDS),
-  status: v.picklist(LIVE_EVENT_STATUSES),
-  repo: v.nullable(v.string()),
-  agent: v.nullable(v.string()),
-  tool: v.nullable(v.string()),
-  /**
-   * L'etape du run au moment du push.
-   *
-   * Estampillee par le tool depuis l'etat du ticket, jamais par l'agent : c'est
-   * la seule facon que le rattachement soit vrai treize agents plus tard.
-   * Optionnelle, parce que tout l'historique ecrit avant elle doit rester
-   * valide — un event qu'on ne sait pas valider est ignore, et on ne va pas
-   * jeter les runs passes pour un champ ajoute apres eux.
-   */
-  step: v.optional(v.nullable(v.string()), null),
-  // `title` doit se lire sans contexte : c'est ce qui s'affiche. Un agent qui
-  // pousse « en cours » a rate son event, d'ou la longueur minimale.
-  title: v.pipe(v.string(), v.minLength(3), v.maxLength(200)),
-  detail: v.nullable(v.string()),
-  payload: v.custom<JsonValue>(() => true),
-});
-
-export type LiveEvent = v.InferOutput<typeof LiveEventSchema>;
-
 export function validateEvent(candidate: unknown): { ok: true; event: LiveEvent } | { ok: false; issues: string[] } {
   const result = v.safeParse(LiveEventSchema, candidate);
   if (result.success) return { ok: true, event: result.output };
@@ -89,7 +45,7 @@ export interface LiveSession {
 }
 
 export function liveSessionPath(ticketId: string): string {
-  return join(autopilotHome(), "live", `${ticketId}.json`);
+  return join(autopilotHome(), "live", `${ticketKey(ticketId)}.json`);
 }
 
 export function readLiveSession(ticketId: string): LiveSession | null {
@@ -215,6 +171,7 @@ export function readEvents(ticketId: string): LiveEvent[] {
 const seqCache = new Map<string, number>();
 
 export function nextSeq(ticketId: string): number {
+  ticketId = ticketKey(ticketId);
   const cached = seqCache.get(ticketId);
   if (cached !== undefined) {
     const next = cached + 1;

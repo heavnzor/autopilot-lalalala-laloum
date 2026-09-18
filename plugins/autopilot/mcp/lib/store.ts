@@ -1,11 +1,13 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
-import { squadOf } from "./config.ts";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { isJsonValue, type JsonValue } from "../../../../shared/json.ts";
+import { loadConfig, squadOf } from "./config.ts";
 import { fail } from "./errors.ts";
-import { ticketStatePath } from "./paths.ts";
+import { autopilotHome, ticketKey, ticketStatePath } from "./paths.ts";
+import { withFileMutex } from "./mutex.ts";
 import { parseYaml, stringifyStrict } from "./yaml.ts";
 
-export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+export type Json = JsonValue;
 
 /**
  * L'etat d'un ticket est la machine a etats du run. Plusieurs agents y ecrivent
@@ -32,11 +34,12 @@ export type Json = null | boolean | number | string | Json[] | { [key: string]: 
  * rien », et le champ existant survit.
  */
 
-const IDENTITY_KEYS = ["name", "id", "repo", "test", "note", "url", "key"] as const;
+const IDENTITY_KEYS = ["id", "name", "repo", "test", "note", "url", "key", "question", "path", "pass"] as const;
 const REPLACE_SENTINEL = "__replace";
 const INCREMENT_SENTINEL = "__increment";
 
 export function mergePatch(base: Json, patch: Json): Json {
+  assertSafeJson(patch);
   if (isReplaceEnvelope(patch)) return patch[REPLACE_SENTINEL] as Json;
   if (isIncrementEnvelope(patch)) {
     const step = patch[INCREMENT_SENTINEL];
@@ -72,9 +75,16 @@ function mergeArrays(base: Json[], patch: Json[]): Json[] {
   }
 
   const identity = identityKeyOf(patch) ?? identityKeyOf(base);
-  // Meme sans identite, une entree traverse le merge : c'est la seule chose qui
-  // resout les enveloppes qu'elle porte.
-  if (!identity) return patch.map((item) => mergePatch(null, item));
+  // Une liste anonyme s'empile elle aussi. Son remplacement doit etre explicite :
+  // le cadrage ecrit ses arbitrages par petits lots, pas par snapshots complets.
+  if (!identity) {
+    const out = [...base];
+    for (const item of patch) {
+      const resolved = mergePatch(null, item);
+      if (!out.some((entry) => JSON.stringify(entry) === JSON.stringify(resolved))) out.push(resolved);
+    }
+    return out;
+  }
 
   const out: Json[] = base.map((item) => item);
   for (const item of patch) {
@@ -83,7 +93,13 @@ function mergeArrays(base: Json[], patch: Json[]): Json[] {
       continue;
     }
     const id = item[identity];
-    const index = out.findIndex((candidate) => isPlainObject(candidate) && candidate[identity] === id);
+    const matches = out.flatMap((candidate, index) => {
+      if (!isPlainObject(candidate) || candidate[identity] !== id) return [];
+      if (identity === "id" && item.repo !== undefined && candidate.repo !== undefined && item.repo !== candidate.repo) return [];
+      return [index];
+    });
+    if (matches.length > 1) fail(`Identifiant de liste ambigu : ${String(id)}.`, "Precise aussi repo dans le patch.");
+    const index = matches[0] ?? -1;
     // Une entree neuve passe par le merge comme les autres, contre une base
     // vide. Poussee telle quelle, elle garderait ses enveloppes en l'etat : le
     // premier tour d'une boucle sur un repo neuf ecrivait `{__increment: 1}` la
@@ -142,21 +158,99 @@ export function ticketStateExists(ticketId: string): boolean {
  * milieu d'une ecriture ne doit pas laisser un etat tronque — ce serait la
  * seule facon de rendre un ticket irreprenable.
  */
-export function patchTicketState(ticketId: string, patch: Json): Json {
-  const path = ticketStatePath(ticketId);
-  const base = readTicketState(ticketId) ?? emptyTicketState(ticketId);
-  const merged = mergePatch(base, patch);
-  if (!isPlainObject(merged)) fail("L'etat d'un ticket doit rester un objet.");
+export function patchTicketState(ticketId: string, patch: Json, expected?: { step: string; repo: string | null }): Json {
+  const key = ticketKey(ticketId);
+  return withFileMutex(join(autopilotHome(), "locks", `state-${key}.lock`), () => {
+    const path = ticketStatePath(key);
+    const base = readTicketState(key) ?? emptyTicketState(key);
+    if (expected) {
+      const run = isPlainObject(base) && isPlainObject(base.run ?? null) ? base.run as Record<string, Json> : {};
+      if (String(run.step) !== expected.step || (run.currentRepo ?? null) !== expected.repo) {
+        fail("Le curseur a deja change : transition refusee.", "Relis get-store-ticket avant de router un autre verdict.");
+      }
+    }
+    const merged = mergePatch(base, patch);
+    validateTicketState(key, merged, base);
+    const state = merged as Record<string, Json>;
+    state.run = { ...(state.run as Record<string, Json>), updatedAt: new Date().toISOString() };
+    state.schemaVersion = 1;
 
-  const run = isPlainObject(merged.run ?? null) ? (merged.run as { [key: string]: Json }) : {};
-  merged.run = { ...run, updatedAt: new Date().toISOString() };
-  merged.schemaVersion = 1;
+    mkdirSync(dirname(path), { recursive: true });
+    const temp = `${path}.${process.pid}.tmp`;
+    try {
+      writeFileSync(temp, stringifyStrict(state), { encoding: "utf8", mode: 0o600 });
+      renameSync(temp, path);
+    } finally {
+      rmSync(temp, { force: true });
+    }
+    return state;
+  });
+}
 
-  mkdirSync(dirname(path), { recursive: true });
-  const temp = `${path}.${process.pid}.tmp`;
-  writeFileSync(temp, stringifyStrict(merged), "utf8");
-  renameSync(temp, path);
-  return merged;
+function assertSafeJson(value: Json): void {
+  if (!isJsonValue(value)) fail("L'etat doit etre un JSON fini et serialisable.");
+  const walk = (entry: Json): void => {
+    if (!entry || typeof entry !== "object") return;
+    for (const [key, child] of Object.entries(entry)) {
+      if (["__proto__", "constructor", "prototype"].includes(key)) fail(`Cle d'etat interdite : ${key}.`);
+      walk(child);
+    }
+  };
+  walk(value);
+}
+
+/** Validation du resultat, apres resolution de TOUTES les enveloppes de patch. */
+export function validateTicketState(ticketId: string, value: Json, previous: Json): void {
+  assertSafeJson(value);
+  if (!isPlainObject(value) || !isPlainObject(value.run ?? null) || !Array.isArray(value.scope)) {
+    fail("L'etat doit porter un objet run et une liste scope.");
+  }
+  const run = value.run as Record<string, Json>;
+  const step = String(run.step ?? "").trim();
+  if (!/^(?:[1-9]|10(?:\.[1-7])?|11|12|13)$/.test(step)) fail(`\`run.step\` invalide : ${step}.`);
+  run.step = step;
+  if (!isPlainObject(value.ticket ?? null) || (value.ticket as Record<string, Json>).key !== ticketId) {
+    fail("La cle du ticket ne peut pas changer pendant un run.");
+  }
+  const budgets = loadConfig().budgets as unknown as Record<string, number | undefined>;
+  const oldScope = isPlainObject(previous) && Array.isArray(previous.scope) ? previous.scope : [];
+  let turns = 0;
+  const names = new Set<string>();
+  for (const entry of value.scope) {
+    if (!isPlainObject(entry)) fail("Chaque entree scope doit etre un objet.");
+    const name = String(entry.name ?? entry.repo ?? "");
+    if (!name || names.has(name)) fail(`Depot absent ou duplique dans le scope : ${name}.`);
+    names.add(name);
+    const loops = entry.loops ?? {};
+    if (!isPlainObject(loops)) fail(`Compteurs invalides pour ${name}.`);
+    for (const [loop, count] of Object.entries(loops)) {
+      if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0) fail(`Compteur ${name}.${loop} invalide.`);
+      const budget = budgets[loop];
+      if (typeof budget === "number" && count > budget) {
+        fail(
+          `\`${loop}\` passerait a ${count} sur ${name}, pour un budget de ${budget}.`,
+          "Appelle `escalate-to-human`. Si la boucle n'a pas rendu de verdict, elle ne se debite pas : escalade avec cause environment.",
+        );
+      }
+      turns += count;
+    }
+  }
+  for (const entry of oldScope) {
+    if (!isPlainObject(entry) || !isPlainObject(entry.loops ?? null)) continue;
+    const current = value.scope.find((item) => isPlainObject(item) && (item.name ?? item.repo) === (entry.name ?? entry.repo));
+    const loops = isPlainObject(current ?? null) && isPlainObject((current as Record<string, Json>).loops ?? null)
+      ? ((current as Record<string, Json>).loops as Record<string, Json>) : {};
+    for (const [loop, before] of Object.entries(entry.loops as Record<string, Json>)) {
+      if (typeof before === "number" && Number(loops[loop] ?? 0) < before) fail(`Le compteur ${loop} ne peut pas reculer.`, "Un nouveau run se cree avec clear-run, pas en effacant ses budgets.");
+    }
+  }
+  if (!isPlainObject(value.metrics ?? null)) fail("metrics doit rester un objet.");
+  const metrics = value.metrics as Record<string, Json>;
+  metrics.loopTurnsTotal = turns;
+  for (const key of ["humanInterventions", "mrFeedbackCount"]) {
+    const count = metrics[key];
+    if (count !== null && (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0)) fail(`Compteur metrics.${key} invalide.`);
+  }
 }
 
 /**

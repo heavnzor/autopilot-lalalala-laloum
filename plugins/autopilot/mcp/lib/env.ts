@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { parseEnv } from "node:util";
 import { fail } from "./errors.ts";
 import { projectRoot } from "./paths.ts";
 
@@ -41,16 +42,7 @@ function load(): Map<string, string> {
   } catch {
     raw = "";
   }
-  for (const line of raw.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const eq = trimmed.indexOf("=");
-    if (eq <= 0) continue;
-    const key = trimmed.slice(0, eq).trim();
-    let value = trimmed.slice(eq + 1).trim();
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-      value = value.slice(1, -1);
-    }
+  for (const [key, value] of Object.entries(parseEnv(raw))) {
     if (value) values.set(key, value);
   }
   // L'environnement du process l'emporte : c'est ce qui permet aux tests de

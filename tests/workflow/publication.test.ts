@@ -4,7 +4,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { nextDevVersion } from "../../plugins/autopilot/mcp/lib/naming.ts";
-import { openRepo } from "./cycle.ts";
+import { openRepo, prepareUpstream } from "./cycle.ts";
 import { createSandbox, type Sandbox } from "./harness.ts";
 
 function git(cwd: string, args: string[]): string {
@@ -29,6 +29,7 @@ async function publishUpstream(
   ticketId: string,
   version: string,
 ): Promise<{ verdict: string; tag: string }> {
+  await prepareUpstream(sandbox, ticketId);
   // 1. poser le tag et le pousser — seule ecriture distante avant le point 13
   await sandbox.call("push-tag", { ticketId, repo: "fixture-core", tag: version, message: `${version} (${ticketId})` });
 
@@ -69,11 +70,10 @@ describe("scenario 3 — publication amont, dans l'ordre", () => {
 
       // 3. et seulement maintenant, le bump en aval
       bump(app.worktree, "@fixture/core", version);
-      await sandbox.call("create-commit", {
+      await sandbox.call("create-code-commit", {
         ticketId: "TJ-400",
         repo: "fixture-app",
         message: `chore: bump @fixture/core to ${version}\n\nRefs: TJ-400`,
-        role: "developer",
       });
 
       const deps = JSON.parse(readFileSync(join(app.worktree, "deps.json"), "utf8")) as Record<string, string>;
@@ -120,7 +120,7 @@ describe("scenario 3 — publication amont, dans l'ordre", () => {
 });
 
 describe("scenario 4 — republication", () => {
-  it("incremente le suffixe et refuse de republier la meme version", async () => {
+  it("incremente le suffixe et refuse de deplacer une version existante", async () => {
     const sandbox = await createSandbox({ ticket: { key: "TJ-500", summary: "Republier apres la review" } });
     try {
       await openRepo(sandbox, { ticketId: "TJ-500", repo: "fixture-core", title: "Republier apres la review" });
@@ -133,15 +133,15 @@ describe("scenario 4 — republication", () => {
 
       // Le code-adversary fait remuer l'amont : il faut pouvoir republier.
       writeFileSync(join(sandbox.home, "worktrees", "TJ-500", "fixture-core", "src", "period.js"), "export function clamp(p) {\n  return p ?? '';\n}\n", "utf8");
-      await sandbox.call("create-commit", {
+      await sandbox.call("create-code-commit", {
         ticketId: "TJ-500",
         repo: "fixture-core",
         message: "fix: handle the empty period\n\nRefs: TJ-500",
-        role: "developer",
       });
 
       // Republier la meme version serait un rejet du registre, ou pire un cache
       // qui sert l'ancien artefact sans rien dire.
+      await prepareUpstream(sandbox, "TJ-500");
       const refusal = await sandbox.expectFailure("push-tag", { ticketId: "TJ-500", repo: "fixture-core", tag: first });
       assert.match(refusal, /existe deja/);
 
@@ -165,6 +165,7 @@ describe("scenario 4 — republication", () => {
     try {
       await openRepo(sandbox, { ticketId: "TJ-510", repo: "fixture-core", title: "Pipeline qui traine" });
       const version = "v1.0.0-TJ-510-1";
+      await prepareUpstream(sandbox, "TJ-510");
       await sandbox.call("push-tag", { ticketId: "TJ-510", repo: "fixture-core", tag: version });
 
       // Le pipeline existe mais ses jobs ne finissent jamais.

@@ -12,7 +12,8 @@
     "worktree jetable. Ce qu'elle ne contient PAS, et ne doit jamais contenir : toute",
     "ecriture distante ou irreversible — push-branch, push-tag, les tools gitlab",
     "d'ecriture, les transitions Jira, Slack, et l'ecriture memoire. Celles-la restent",
-    "sous approbation, c'est leur seul garde-fou avant le point 13."
+    "sous approbation du client. Le serveur verifie aussi le plan approuve,",
+    "les checklists et les preuves du commit avant les publications."
   ],
   "permissions": {
     "allow": [
@@ -28,7 +29,10 @@
       "mcp__plugin_autopilot_autopilot__setup-repo",
       "mcp__plugin_autopilot_autopilot__remove-worktree",
       "mcp__plugin_autopilot_autopilot__monorepo-filter",
-      "mcp__plugin_autopilot_autopilot__create-commit",
+      "mcp__plugin_autopilot_autopilot__create-code-commit",
+      "mcp__plugin_autopilot_autopilot__create-test-commit",
+      "mcp__plugin_autopilot_autopilot__get-repo-diff",
+      "mcp__plugin_autopilot_autopilot__advance-workflow",
       "mcp__plugin_autopilot_autopilot__generate-commit-message",
       "mcp__plugin_autopilot_autopilot__generate-branch-name",
       "mcp__plugin_autopilot_autopilot__generate-mr-name",

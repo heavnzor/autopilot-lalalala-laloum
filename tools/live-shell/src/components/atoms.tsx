@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { cn } from "#/lib/utils";
+import type { Progress } from "../lib/progress.ts";
+export type { Progress, RunMark } from "../lib/progress.ts";
 
 /**
  * Les quelques primitives de la page.
@@ -42,7 +44,6 @@ export function Spinner({ className }: { className?: string }) {
  * - `error` — pastille rouge. Echec ou escalade.
  * - `done` — pastille verte. A rendu.
  */
-export type Progress = "todo" | "running" | "idle" | "human" | "error" | "done";
 
 /**
  * L'etat du run, qui est celui de ce qui travaille le plus profond.
@@ -50,7 +51,6 @@ export type Progress = "todo" | "running" | "idle" | "human" | "error" | "done";
  * Pas de `todo` : un run affiche est un run qui existe. Le detail du classement
  * vit dans `runMark`.
  */
-export type RunMark = Exclude<Progress, "todo">;
 
 const DOT: Record<Exclude<Progress, "running">, { tone: string; label: string }> = {
   todo: { tone: "border border-ink-faint/40", label: "pas commence" },

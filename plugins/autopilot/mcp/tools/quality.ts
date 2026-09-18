@@ -3,6 +3,9 @@ import { join } from "node:path";
 import { type CommandKind, type RepoEntry, findRepo, loadConfig, reportPathFor, targetingFor } from "../lib/config.ts";
 import { fail } from "../lib/errors.ts";
 import { run, stopReason } from "../lib/exec.ts";
+import { commandFilter } from "../lib/git.ts";
+import { captureRevision, recordVerification } from "../lib/verification.ts";
+import { readReceipt, receiptPath } from "../lib/receipts.ts";
 import { worktreePath } from "../lib/paths.ts";
 import { arr, obj, str } from "../lib/schema.ts";
 import { type AnyTool, defineTool } from "../lib/tool.ts";
@@ -33,7 +36,8 @@ export const qualityTools: AnyTool[] = KINDS.map(({ kind, tool, label }) =>
       {
         ticketId: str("Cle Jira, elle designe le worktree."),
         repo: str("Nom du repo dans le registre."),
-        filter: str("Drapeaux de filtre monorepo, tels que rendus par monorepo-filter."),
+        filter: str("Compatibilite : uniquement --filter=<paquet> (turbo) ou --scope=<paquet> (lerna). Prefere packages."),
+        packages: arr("Noms des paquets a verifier, tels que rendus par monorepo-filter. Aucun fragment shell.", str("Nom de paquet.")),
         paths: arr(
           "Fichiers ou motifs a cibler. La facon de les passer au runner est declaree par le repo (`targeting` du registre) : n'invente pas de drapeau, et ne conclus pas d'un refus d'argument que le repo n'est pas ciblable.",
           str("Chemin ou motif."),
@@ -45,10 +49,11 @@ export const qualityTools: AnyTool[] = KINDS.map(({ kind, tool, label }) =>
       ["ticketId", "repo"],
     ),
     handler: async (
-      input: { ticketId: string; repo: string; filter?: string; paths?: string[]; focus?: string },
+      input: { ticketId: string; repo: string; filter?: string; packages?: string[]; paths?: string[]; focus?: string },
       context,
     ) => {
       const repo = findRepo(input.repo);
+      const filter = commandFilter(repo, input);
       const command = repo.commands?.[kind] ?? null;
 
       if (!command) {
@@ -74,7 +79,9 @@ export const qualityTools: AnyTool[] = KINDS.map(({ kind, tool, label }) =>
 
       const timeouts = loadConfig().timeouts;
       const targeting = renderTargeting(template ?? "{paths}", input.paths);
-      const full = [command, input.filter, targeting].filter(Boolean).join(" ");
+      const full = [command, filter, targeting].filter(Boolean).join(" ");
+      const before = await captureRevision(cwd);
+      const approvedBefore = readReceipt<{ fingerprint: string }>(receiptPath(input.ticketId, "approval.json"))?.fingerprint ?? null;
       const result = await run(full, {
         cwd,
         timeoutMs: timeouts.commandSeconds * 1000,
@@ -86,6 +93,19 @@ export const qualityTools: AnyTool[] = KINDS.map(({ kind, tool, label }) =>
         // et laisse l'agent avec un timeout qu'il ne sait pas interpreter.
         onProgress: (message) => context.heartbeat(`${repo.name} ${kind} — ${message}`),
       });
+      const after = await captureRevision(cwd);
+      const approvedAfter = readReceipt<{ fingerprint: string }>(receiptPath(input.ticketId, "approval.json"))?.fingerprint ?? null;
+      const stable = Boolean(before?.clean && after?.clean && before.sha === after.sha && approvedBefore === approvedAfter);
+      const verification = {
+        sha: after?.sha ?? null,
+        passed: result.exitCode === 0 && stable,
+        full: !filter && !input.paths?.length,
+        command,
+        at: new Date().toISOString(),
+        durationMs: result.durationMs,
+        planFingerprint: approvedBefore,
+      };
+      recordVerification(input.ticketId, repo.name, kind, verification);
 
       const report = result.exitCode === 0 ? null : readReport(repo, kind, cwd);
       const note = advice(result, repo, kind);
@@ -106,6 +126,7 @@ export const qualityTools: AnyTool[] = KINDS.map(({ kind, tool, label }) =>
         truncated: result.truncated,
         logPath: result.logPath,
         focusMatched: result.focusMatched,
+        verification,
         ...(report ? { report } : {}),
         ...(note ? { advice: note } : {}),
       };
@@ -128,6 +149,11 @@ export function renderTargeting(template: string, paths: readonly string[] | und
   // Pas de chemin, pas de ciblage : le gabarit ne doit pas laisser un `-g` nu
   // dans la commande, qui ferait alors tourner le glob par defaut du runner.
   if (!paths || paths.length === 0) return "";
+  for (const path of paths) {
+    if (!path || /^[\/-]/.test(path) || /[\0\r\n\\]/.test(path) || path.split("/").includes("..")) {
+      fail(`Cible de test invalide : ${JSON.stringify(path)}.`, "Un chemin relatif ou un glob, jamais un drapeau ni un chemin hors du depot.");
+    }
+  }
   const glob = paths.length === 1 ? (paths[0] ?? "") : `{${paths.join(",")}}`;
   return template
     .replaceAll("{paths}", paths.map(quote).join(" "))

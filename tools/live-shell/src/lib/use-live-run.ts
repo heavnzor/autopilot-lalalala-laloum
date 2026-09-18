@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { Progress, RunMark } from "../components/atoms.tsx";
+import type { Progress, RunMark } from "./progress.ts";
 import {
   type JsonValue,
   type LiveEvent,
@@ -177,10 +177,10 @@ export function useLiveRun(initial: RunSnapshot = EMPTY) {
     [snapshot.ticket],
   );
 
-  const derived = useMemo(() => derive(snapshot.events, ticket.run.step), [snapshot.events, ticket.run.step]);
+  const derived = useMemo(() => derive(snapshot.events, ticket.run.step, ticket.run.currentRepo, ticket.run.phase), [snapshot.events, ticket.run.step, ticket.run.currentRepo, ticket.run.phase]);
   const mark = useMemo(
-    () => runMark(ticket, derived.step, derived.current, snapshot.question),
-    [ticket, derived.step, derived.current, snapshot.question],
+    () => runMark(ticket, derived.step, derived.current, snapshot.question, snapshot.plan),
+    [ticket, derived.step, derived.current, snapshot.question, snapshot.plan],
   );
   // Apres `mark`, parce qu'il en depend : l'etape courante ne peut pas etre
   // rouge pendant que le bandeau est vert.
@@ -238,13 +238,8 @@ export interface Derived {
    */
   readonly working: LiveEvent | null;
   /**
-   * L'etape du run, recoupee sur trois lectures.
-   *
-   * `run.step` seul retardait d'un point entier — le workflow ecrit l'etat
-   * **apres** chaque point, donc pendant que le `functional-grill` travaillait,
-   * le fichier disait encore « Lecture du ticket ». On prend donc la plus
-   * avancee de trois sources : le YAML, l'etape estampillee sur le dernier
-   * event, et celle qu'implique l'agent qui parle. Elle ne recule jamais.
+   * Le curseur persiste fait autorite, y compris lors d'un retour de boucle.
+   * Le flux ne sert de repli qu'en l'absence d'un curseur lisible.
    */
   readonly step: string;
   readonly busy: boolean;
@@ -263,10 +258,11 @@ export interface Derived {
   readonly worksites: ReadonlyMap<string, Worksite>;
 }
 
-function derive(events: readonly LiveEvent[], ticketStep: string): Derived {
+export function derive(events: readonly LiveEvent[], ticketStep: string, currentRepo: string | null = null, phase: string | null = null): Derived {
   const loops = new Map<string, LoopCounter>();
   for (const event of events) {
     if (event.kind !== "loop") continue;
+    if (currentRepo && event.repo && event.repo !== currentRepo) continue;
     const payload = (event.payload ?? {}) as {
       name?: string;
       count?: number;
@@ -291,7 +287,7 @@ function derive(events: readonly LiveEvent[], ticketStep: string): Derived {
   const live =
     current !== null &&
     current.status !== "ko" &&
-    !(current.status === "ok" && stepIndex(step) === STEPS.length - 1);
+    phase !== "done" && phase !== "completed";
 
   return {
     current,
@@ -432,7 +428,7 @@ function sum(left: number | null | undefined, right: number | undefined): number
 }
 
 /**
- * Un curseur d'etape qui ne recule jamais.
+ * Un curseur d'etape qui distingue le point et son sous-point.
  *
  * Le point et son sous-point sont tenus separement : le cycle d'implementation
  * tient entier dans le point 10, donc compare sur le seul point, `10.6` et
@@ -445,7 +441,7 @@ interface Cursor {
   sub: number;
 }
 
-function advance(cursor: Cursor, raw: string | null | undefined): void {
+function advance(cursor: Cursor, raw: string | null | undefined, authoritative = false): void {
   if (!raw) return;
   const token = stepToken(raw);
   const rank = token ? stepIndex(token.top) : -1;
@@ -453,7 +449,7 @@ function advance(cursor: Cursor, raw: string | null | undefined): void {
   // ferait reculer a -1, et tout le flux d'apres tomberait avec elle.
   if (!token || rank < 0) return;
   const sub = token.sub;
-  if (rank > cursor.rank || (rank === cursor.rank && sub > cursor.sub)) {
+  if (authoritative || rank > cursor.rank || (rank === cursor.rank && sub > cursor.sub)) {
     cursor.step = raw;
     cursor.rank = rank;
     cursor.sub = sub;
@@ -499,28 +495,23 @@ function walkSteps(events: readonly LiveEvent[]): readonly Placed[] {
 
   return events.map((event) => {
     const stamped = Boolean(event.step) && stepIndex(String(event.step)) >= 0;
-    advance(cursor, event.step);
+    advance(cursor, event.step, stamped);
 
     const implied = event.agent ? stepOfAgent(event.agent, cursor.rank) : null;
-    advance(cursor, implied);
+    if (!stamped) advance(cursor, implied, true);
 
     return { step: cursor.step, sure: stamped || implied !== null };
   });
 }
 
 /**
- * L'etape du run : la plus avancee entre le YAML et ce que le flux a montre.
- *
- * Le YAML retarde, mais il est la seule source au demarrage, avant le premier
- * event. Le flux est a la seconde, mais il ne sait rien d'un run repris. Aucune
- * des deux ne remplace l'autre, et la plus avancee des deux ne ment dans aucun
- * des deux sens.
+ * Le YAML porte le curseur courant. Choisir le maximum historique masquerait
+ * les reprises, les retours au cadrage et le debut du depot suivant.
  */
 function deriveStep(trail: readonly Placed[], ticketStep: string): string {
-  const cursor: Cursor = { step: null, rank: -1, sub: 0 };
-  advance(cursor, ticketStep);
-  advance(cursor, trail.at(-1)?.step);
-  return cursor.step ?? ticketStep;
+  // Le curseur peut reculer : nouvelle iteration, autre depot, plan rejete.
+  // Une ancienne etape plus haute n'a aucune autorite sur l'etat courant.
+  return stepToken(ticketStep) ? ticketStep : trail.at(-1)?.step ?? ticketStep;
 }
 
 /**
@@ -698,16 +689,17 @@ function nest(seen: ReadonlyMap<string, Progress>): readonly StepAgent[] {
  */
 export function runMark(
   ticket: Ticket,
-  step: string,
+  _step: string,
   current: LiveEvent | null,
   question: PendingQuestion | null,
+  plan: PendingPlan | null = null,
 ): RunMark {
   if (ticket.run.escalation !== null || current?.status === "ko") return "error";
-  if (question !== null || current?.status === "waiting") return "human";
+  if (question !== null || plan !== null || current?.status === "waiting") return "human";
   // Rien n'a encore ete pousse : c'est le seul repos qu'un run connaisse.
   if (current === null) return "idle";
-  // Sur la derniere etape, un `ok` clot le run.
-  if (current.status === "ok" && stepIndex(step) === STEPS.length - 1) return "done";
+  // La fin est explicite ; un `ok` intermediaire du finalizer ne suffit pas.
+  if (ticket.run.phase === "done" || ticket.run.phase === "completed") return "done";
   // Partout ailleurs, un `ok` clot une **action**. Entre deux events, l'agent
   // n'attend pas : il lit, il reflechit, il prepare le lot suivant. La page le
   // rendait « au repos », pastille grise, pendant douze minutes de travail —

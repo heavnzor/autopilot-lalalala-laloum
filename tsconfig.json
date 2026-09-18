@@ -14,6 +14,6 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["plugins/autopilot/mcp/**/*.ts", "tests/**/*.ts"],
+  "include": ["plugins/autopilot/mcp/**/*.ts", "shared/**/*.ts", "tests/**/*.ts"],
   "exclude": ["tools/live-shell", "node_modules"]
 }

@@ -72,8 +72,9 @@ export async function createMergeRequest(input: {
   title: string;
   description: string;
 }): Promise<MergeRequest> {
+  const title = loadConfig().gitlab.mrDraft && !input.title.startsWith("Draft: ") ? `Draft: ${input.title}` : input.title;
   const existing = await findMergeRequestForBranch(input.projectPath, input.sourceBranch);
-  if (existing) return updateMergeRequest(input.projectPath, existing.iid, { title: input.title, description: input.description });
+  if (existing) return updateMergeRequest(input.projectPath, existing.iid, { title, description: input.description });
 
   const { data } = await request<MergeRequest>(`${base()}/projects/${project(input.projectPath)}/merge_requests`, {
     method: "POST",
@@ -81,7 +82,7 @@ export async function createMergeRequest(input: {
     body: {
       source_branch: input.sourceBranch,
       target_branch: input.targetBranch,
-      title: loadConfig().gitlab.mrDraft && !input.title.startsWith("Draft: ") ? `Draft: ${input.title}` : input.title,
+      title,
       description: input.description,
       remove_source_branch: true,
       squash: false,
@@ -104,11 +105,7 @@ export async function updateMergeRequest(
 }
 
 export async function listNotes(projectPath: string, iid: number): Promise<unknown[]> {
-  const { data } = await request<unknown[]>(
-    `${base()}/projects/${project(projectPath)}/merge_requests/${iid}/notes?per_page=100`,
-    { headers: headers() },
-  );
-  return Array.isArray(data) ? data : [];
+  return pages(`${base()}/projects/${project(projectPath)}/merge_requests/${iid}/notes`);
 }
 
 export async function createNote(projectPath: string, iid: number, body: string): Promise<unknown> {
@@ -129,27 +126,32 @@ export async function createTag(projectPath: string, tag: string, ref: string, m
 }
 
 export async function listTags(projectPath: string): Promise<string[]> {
-  const { data } = await request<{ name: string }[]>(
-    `${base()}/projects/${project(projectPath)}/repository/tags?per_page=100`,
-    { headers: headers() },
-  );
-  return Array.isArray(data) ? data.map((tag) => tag.name) : [];
+  return (await pages<{ name: string }>(`${base()}/projects/${project(projectPath)}/repository/tags`)).map((tag) => tag.name);
 }
 
-export async function latestPipeline(projectPath: string, ref: string): Promise<Pipeline | null> {
+export async function latestPipeline(projectPath: string, ref: string, signal?: AbortSignal): Promise<Pipeline | null> {
   const { data } = await request<Pipeline[]>(
     `${base()}/projects/${project(projectPath)}/pipelines?ref=${encodeURIComponent(ref)}&per_page=1&order_by=id&sort=desc`,
-    { headers: headers() },
+    { headers: headers(), signal },
   );
   return Array.isArray(data) ? (data[0] ?? null) : null;
 }
 
-export async function pipelineJobs(projectPath: string, pipelineId: number): Promise<Job[]> {
-  const { data } = await request<Job[]>(
-    `${base()}/projects/${project(projectPath)}/pipelines/${pipelineId}/jobs?per_page=100`,
-    { headers: headers() },
-  );
-  return Array.isArray(data) ? data : [];
+export async function pipelineJobs(projectPath: string, pipelineId: number, signal?: AbortSignal): Promise<Job[]> {
+  return pages(`${base()}/projects/${project(projectPath)}/pipelines/${pipelineId}/jobs`, signal);
+}
+
+async function pages<T>(url: string, signal?: AbortSignal): Promise<T[]> {
+  const entries: T[] = [];
+  for (let page = 1; page <= 1_000; page += 1) {
+    const response = await request<T[]>(`${url}?per_page=100&page=${page}`, { headers: headers(), signal });
+    if (!Array.isArray(response.data)) fail("Reponse GitLab invalide : liste attendue.");
+    entries.push(...response.data);
+    const next = response.headers.get("x-next-page");
+    if (next === "" || (next === null && response.data.length < 100)) return entries;
+    if (next !== null && Number(next) !== page + 1) fail("Pagination GitLab incoherente.");
+  }
+  return fail("Limite de pagination GitLab atteinte ; resultat incomplet refuse.");
 }
 
 export type WatchVerdict = "success" | "failed" | "timeout" | "no-pipeline";
@@ -159,6 +161,8 @@ export interface WatchResult {
   readonly pipeline: Pipeline | null;
   readonly jobs: { name: string; status: string }[];
   readonly waitedSeconds: number;
+  readonly missingJobs?: readonly string[];
+  readonly reason?: string;
 }
 
 /**
@@ -175,34 +179,58 @@ export async function watchPipeline(input: {
   jobs: readonly string[];
   timeoutSeconds: number;
   pollSeconds?: number;
+  expectedSha?: string;
+  onProgress?: (message: string) => void;
 }): Promise<WatchResult> {
+  if (!Number.isFinite(input.timeoutSeconds) || input.timeoutSeconds <= 0) fail("Timeout CI invalide.");
+  if (!Number.isFinite(input.pollSeconds ?? 15) || (input.pollSeconds ?? 15) <= 0) fail("Intervalle CI invalide.");
+  if (input.expectedSha && !/^[a-f0-9]{7,40}$/i.test(input.expectedSha)) fail("SHA attendu invalide.");
+  if (input.jobs.some((name) => !name.trim()) || new Set(input.jobs).size !== input.jobs.length) fail("Jobs CI vides ou dupliques.");
   const started = Date.now();
   const poll = (input.pollSeconds ?? 15) * 1000;
   const deadline = started + input.timeoutSeconds * 1000;
+  const signal = AbortSignal.timeout(Math.ceil(input.timeoutSeconds * 1000));
+  let observed: Pipeline | null = null;
+  let summary: { name: string; status: string }[] = [];
+  let missing: string[] = [...input.jobs];
 
   while (Date.now() < deadline) {
-    const pipeline = await latestPipeline(input.projectPath, input.ref);
+    let pipeline: Pipeline | null;
+    let jobs: Job[] = [];
+    try {
+      input.onProgress?.(`CI ${input.ref} — ${elapsed(started)}s`);
+      pipeline = await latestPipeline(input.projectPath, input.ref, signal);
+      if (pipeline && (!input.expectedSha || pipeline.sha.startsWith(input.expectedSha))) {
+        observed = pipeline;
+        jobs = await pipelineJobs(input.projectPath, pipeline.id, signal);
+      } else pipeline = null;
+    } catch (error) {
+      if (signal.aborted) break;
+      throw error;
+    }
     if (pipeline) {
-      const jobs = await pipelineJobs(input.projectPath, pipeline.id);
       const watched = input.jobs.length
         ? jobs.filter((job) => input.jobs.includes(job.name))
         : jobs;
-      const summary = watched.map((job) => ({ name: job.name, status: job.status }));
+      summary = watched.map((job) => ({ name: job.name, status: job.status }));
+      missing = input.jobs.filter((name) => !watched.some((job) => job.name === name));
 
-      if (watched.some((job) => job.status === "failed")) {
-        return { verdict: "failed", pipeline, jobs: summary, waitedSeconds: elapsed(started) };
+      if (watched.some((job) => ["failed", "canceled", "skipped", "manual"].includes(job.status))) {
+        return { verdict: "failed", pipeline, jobs: summary, missingJobs: missing, waitedSeconds: elapsed(started), reason: "Un job requis est en echec, annule, ignore ou attend une action manuelle." };
       }
-      const settled = watched.length > 0 && watched.every((job) => ["success", "manual", "skipped"].includes(job.status));
+      const settled = missing.length === 0 && watched.length > 0 && watched.every((job) => job.status === "success");
       if (settled) {
         return { verdict: "success", pipeline, jobs: summary, waitedSeconds: elapsed(started) };
       }
+      if (["success", "failed", "canceled", "skipped"].includes(pipeline.status) && missing.length > 0) {
+        return { verdict: "failed", pipeline, jobs: summary, missingJobs: missing, waitedSeconds: elapsed(started), reason: "Le pipeline termine ne contient pas tous les jobs requis." };
+      }
     }
-    await new Promise((resolve) => setTimeout(resolve, poll));
+    await new Promise((resolve) => setTimeout(resolve, Math.max(0, Math.min(poll, deadline - Date.now()))));
   }
 
-  const pipeline = await latestPipeline(input.projectPath, input.ref);
-  if (!pipeline) return { verdict: "no-pipeline", pipeline: null, jobs: [], waitedSeconds: elapsed(started) };
-  return { verdict: "timeout", pipeline, jobs: [], waitedSeconds: elapsed(started) };
+  if (!observed) return { verdict: "no-pipeline", pipeline: null, jobs: [], waitedSeconds: elapsed(started), reason: "Aucun pipeline correspondant a la ref et au SHA attendus." };
+  return { verdict: "timeout", pipeline: observed, jobs: summary, missingJobs: missing, waitedSeconds: elapsed(started) };
 }
 
 export function assertProjectPath(path: string): string {

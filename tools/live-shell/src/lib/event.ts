@@ -1,4 +1,7 @@
 import * as v from "valibot";
+import { LiveEventSchema, type LiveEvent } from "../../../../shared/events.ts";
+export { LiveEventSchema, LIVE_EVENT_KINDS, LIVE_EVENT_STATUSES } from "../../../../shared/events.ts";
+export type { LiveEvent, JsonValue } from "../../../../shared/events.ts";
 
 /**
  * Le format d'event, valide cote app.
@@ -16,50 +19,7 @@ import * as v from "valibot";
  * il doit donc etre serialisable. `unknown` laissait passer une Date ou une Map,
  * qui arrivaient cassees de l'autre cote sans que rien ne le dise.
  */
-export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
-
-export const LIVE_EVENT_KINDS = [
-  "step",
-  "agent",
-  "tool",
-  "loop",
-  "todo",
-  "question",
-  "answer",
-  "plan",
-  "decision",
-  "escalation",
-  "message",
-] as const;
-
-export const LIVE_EVENT_STATUSES = ["start", "progress", "ok", "ko", "waiting"] as const;
-
-export const LiveEventSchema = v.object({
-  runId: v.pipe(v.string(), v.minLength(1)),
-  ticketId: v.pipe(v.string(), v.minLength(1)),
-  seq: v.pipe(v.number(), v.integer(), v.minValue(0)),
-  ts: v.pipe(v.string(), v.isoTimestamp()),
-  kind: v.picklist(LIVE_EVENT_KINDS),
-  status: v.picklist(LIVE_EVENT_STATUSES),
-  repo: v.nullable(v.string()),
-  agent: v.nullable(v.string()),
-  tool: v.nullable(v.string()),
-  /**
-   * L'etape du run au moment du push, estampillee par le tool.
-   *
-   * Optionnelle : l'historique ecrit avant ce champ doit rester valide, sinon
-   * le rejeu le jetterait en bloc. Absente, l'event n'est rattache a aucune
-   * etape — il reste dans le flux, il ne remonte pas dans le rail.
-   */
-  step: v.optional(v.nullable(v.string()), null),
-  title: v.pipe(v.string(), v.minLength(3), v.maxLength(200)),
-  detail: v.nullable(v.string()),
-  payload: v.custom<JsonValue>(() => true),
-});
-
-export type LiveEvent = v.InferOutput<typeof LiveEventSchema>;
-
-export type LiveEventKind = (typeof LIVE_EVENT_KINDS)[number];
+export type LiveEventKind = LiveEvent["kind"];
 
 export function parseEvent(candidate: unknown): LiveEvent | null {
   const result = v.safeParse(LiveEventSchema, candidate);

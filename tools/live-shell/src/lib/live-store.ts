@@ -57,11 +57,11 @@ export type SlotStatus = "pending" | "answered" | "withdrawn" | "gone";
 
 const pending = new Map<string, Waiting>();
 /** Les lots releves ou retires, gardes pour que l'appelant sache lequel des deux. */
-const settled = new Map<string, { status: Exclude<SlotStatus, "pending" | "gone">; at: number }>();
+const settled = new Map<string, { status: Exclude<SlotStatus, "pending" | "gone">; at: number; answers?: Record<string, string>; decision?: PlanDecision }>();
 const ignored: { at: string; reason: string }[] = [];
 
 let ticketId: string | null = process.env.AUTOPILOT_TICKET_ID ?? null;
-let replayed = false;
+let replayStamp = "";
 
 function autopilotHome(): string {
   return process.env.AUTOPILOT_HOME ?? join(homedir(), ".autopilot");
@@ -73,19 +73,27 @@ function autopilotHome(): string {
  * complet, depuis le debut, avant de se brancher sur le direct.
  */
 export function replay(): void {
-  if (replayed || !ticketId) return;
-  replayed = true;
+  if (!ticketId) return;
   let raw = "";
   try {
-    raw = readFileSync(join(autopilotHome(), "events", `${ticketId}.jsonl`), "utf8");
+    const path = join(autopilotHome(), "events", `${ticketId}.jsonl`);
+    const stat = statSync(path);
+    const stamp = `${stat.ino}:${stat.mtimeMs}:${stat.size}`;
+    if (stamp === replayStamp) return;
+    raw = readFileSync(path, "utf8");
+    replayStamp = stamp;
   } catch {
     return;
   }
+  const known = new Set(events.map((event) => `${event.runId}:${event.seq}`));
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     try {
       const event = parseEvent(JSON.parse(line));
-      if (event) events.push(event);
+      if (event && event.ticketId.toUpperCase() === ticketId.toUpperCase()) {
+        const id = `${event.runId}:${event.seq}`;
+        if (!known.has(id)) { events.push(event); known.add(id); }
+      }
       else
         ignored.push({
           at: new Date().toISOString(),
@@ -113,6 +121,7 @@ export function ingest(candidate: unknown): {
     console.warn("[live-shell]", reason, JSON.stringify(candidate)?.slice(0, 300));
     return { accepted: false, reason };
   }
+  if (ticketId && event.ticketId.toUpperCase() !== ticketId.toUpperCase()) return { accepted: false, reason: "ticket etranger a cette session" };
   ticketId ??= event.ticketId;
   // Un event deja vu au rejeu ne doit pas apparaitre deux fois.
   if (!events.some((existing) => existing.runId === event.runId && existing.seq === event.seq)) {
@@ -251,6 +260,8 @@ export function ask(input: {
   askedBy: string | null;
   id?: string | null;
 }): PendingQuestion {
+  const existing = input.id ? pending.get(input.id) : null;
+  if (existing?.kind === "questions") return existing.question;
   const entry: PendingQuestion = {
     questions: input.questions,
     askedBy: input.askedBy,
@@ -260,6 +271,7 @@ export function ask(input: {
     askedAt: new Date().toISOString(),
     answerable: true,
   };
+  if (settled.has(entry.id)) return { ...entry, answerable: false };
   pending.set(entry.id, { kind: "questions", question: entry, answers: null });
   settled.delete(entry.id);
   broadcast("question", entry);
@@ -280,6 +292,8 @@ export function askPlan(input: {
   askedBy: string | null;
   id?: string | null;
 }): PendingPlan {
+  const existing = input.id ? pending.get(input.id) : null;
+  if (existing?.kind === "plan") return existing.plan;
   const entry: PendingPlan = {
     repos: input.repos,
     note: input.note,
@@ -288,6 +302,7 @@ export function askPlan(input: {
     askedAt: new Date().toISOString(),
     answerable: true,
   };
+  if (settled.has(entry.id)) return { ...entry, answerable: false };
   pending.set(entry.id, { kind: "plan", plan: entry, decision: null });
   settled.delete(entry.id);
   broadcast("plan", entry);
@@ -297,10 +312,9 @@ export function askPlan(input: {
 /**
  * Relever le casier.
  *
- * Un lot repondu se rend **une fois** : on le retire en le rendant, pour que
- * deux releves concurrentes ne fassent pas repartir le run deux fois sur la
- * meme reponse. Ce qui reste derriere est une trace — repondu ou retire — que
- * l'appelant peut relire s'il repasse.
+ * Une releve est idempotente : perdre la reponse HTTP ne doit pas perdre la
+ * decision humaine. Le casier quitte les questions actives, mais sa reponse
+ * reste disponible pendant la vie de cette session.
  */
 export function collect(id: string): {
   status: SlotStatus;
@@ -311,19 +325,19 @@ export function collect(id: string): {
   if (entry) {
     if (entry.kind === "questions" && entry.answers) {
       pending.delete(id);
-      settled.set(id, { status: "answered", at: Date.now() });
+      settled.set(id, { status: "answered", at: Date.now(), answers: entry.answers });
       return { status: "answered", answers: entry.answers };
     }
     if (entry.kind === "plan" && entry.decision) {
       pending.delete(id);
-      settled.set(id, { status: "answered", at: Date.now() });
+      settled.set(id, { status: "answered", at: Date.now(), decision: entry.decision });
       return { status: "answered", decision: entry.decision };
     }
     return { status: "pending" };
   }
 
   const done = settled.get(id);
-  if (done) return { status: done.status };
+  if (done) return { status: done.status, ...(done.answers ? { answers: done.answers } : {}), ...(done.decision ? { decision: done.decision } : {}) };
   // Inconnu : le shell a redemarre depuis le depot. L'appelant redepose.
   return { status: "gone" };
 }
@@ -405,7 +419,7 @@ export function answer(
   if (!entry || entry.kind !== "questions") return { delivered: false, missing: [] };
 
   const missing = entry.question.questions
-    .filter((question) => !answers[question.key]?.trim())
+    .filter((question) => typeof answers[question.key] !== "string" || !answers[question.key]?.trim())
     .map((question) => question.key);
   if (missing.length > 0) return { delivered: false, missing };
 

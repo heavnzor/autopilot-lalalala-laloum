@@ -48,11 +48,10 @@ export async function writeTest(sandbox: Sandbox, options: CycleOptions & { work
     subject: "cover the new behaviour",
     ticketId: options.ticketId,
   });
-  const commit = await sandbox.call<{ commitSha: string }>("create-commit", {
+  const commit = await sandbox.call<{ commitSha: string }>("create-test-commit", {
     ticketId: options.ticketId,
     repo: options.repo,
     message,
-    role: "test-writer",
   });
   return commit.commitSha;
 }
@@ -80,11 +79,10 @@ export async function writeCode(sandbox: Sandbox, options: CycleOptions & { work
     subject: "implement the new behaviour",
     ticketId: options.ticketId,
   });
-  const commit = await sandbox.call<{ commitSha: string }>("create-commit", {
+  const commit = await sandbox.call<{ commitSha: string }>("create-code-commit", {
     ticketId: options.ticketId,
     repo: options.repo,
     message,
-    role: "developer",
   });
   return commit.commitSha;
 }
@@ -98,4 +96,48 @@ export async function closeRepo(sandbox: Sandbox, ticketId: string, repo: string
 
 export function readFile(worktree: string, path: string): string {
   return readFileSync(join(worktree, path), "utf8");
+}
+
+/** Le test emprunte le vrai gate ; il ne forge plus approvedAt dans le YAML. */
+export async function approvePlan(sandbox: Sandbox, ticketId: string, names: string[]): Promise<void> {
+  const repos = names.map((name) => sandbox.repo(name)).sort((a, b) => a.level - b.level || a.name.localeCompare(b.name));
+  const plan = repos.map((repo) => ({ repo: repo.name, level: repo.level, changes: [`Implementer le changement dans ${repo.name}.`], why: "Ordre des dependances." }));
+  const tests = repos.map((repo, index) => ({ id: `T${index + 1}`, repo: repo.name, criterion: "Le comportement attendu est verifie.", status: "pending" }));
+  const code = repos.map((repo, index) => ({ id: `C${index + 1}`, repo: repo.name, criterion: "Les appelants restent compatibles.", status: "pending" }));
+  await sandbox.call("write-store-ticket", { ticketId, patch: {
+    run: { step: "9", phase: "cadrage", escalation: null },
+    scope: repos.map((repo) => ({ name: repo.name, level: repo.level })),
+    plan: { repos: { __replace: plan }, checklists: { tests: { __replace: tests }, code: { __replace: code } } },
+  } });
+  await sandbox.call("ask-plan-approval", { ticketId, repos: plan }, {
+    canAskHuman: true, heartbeat: () => {},
+    askHuman: async () => ({ action: "accept", content: { verdict: "approve", note: "" } }),
+  });
+}
+
+export async function passChecklists(sandbox: Sandbox, ticketId: string, repo?: string): Promise<void> {
+  const state = await sandbox.call<any>("get-store-ticket", { ticketId });
+  const patch = (kind: string) => state.plan.checklists[kind].filter((row: any) => !repo || row.repo === repo).map((row: any) => ({ id: row.id, status: "passed" }));
+  await sandbox.call("write-store-ticket", { ticketId, patch: { plan: { checklists: { tests: patch("tests"), code: patch("code") } } } });
+}
+
+/** Preparation realiste des tests de publication qui ne portent pas sur le TDD. */
+export async function preparePublication(sandbox: Sandbox, ticketId: string, names = ["fixture-core"]): Promise<void> {
+  await approvePlan(sandbox, ticketId, names);
+  for (const repo of names) {
+    await openRepo(sandbox, { ticketId, repo, title: "Publication fixture" });
+    const result = await runTests(sandbox, ticketId, repo);
+    if (!result.passed) throw new Error(result.stdout);
+    await closeRepo(sandbox, ticketId, repo);
+  }
+  await passChecklists(sandbox, ticketId);
+  await sandbox.call("write-store-ticket", { ticketId, patch: { run: { step: "13", phase: "publication" } } });
+}
+
+export async function prepareUpstream(sandbox: Sandbox, ticketId: string): Promise<void> {
+  await approvePlan(sandbox, ticketId, ["fixture-core", "fixture-app"]);
+  const result = await runTests(sandbox, ticketId, "fixture-core");
+  if (!result.passed) throw new Error(result.stdout);
+  await passChecklists(sandbox, ticketId, "fixture-core");
+  await sandbox.call("write-store-ticket", { ticketId, patch: { run: { step: "10.7", phase: "implementation", currentRepo: "fixture-core" } } });
 }

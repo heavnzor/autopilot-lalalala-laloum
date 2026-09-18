@@ -1,8 +1,16 @@
 import { findRepo, loadConfig } from "../lib/config.ts";
+import { fail } from "../lib/errors.ts";
 import * as gl from "../lib/gitlab.ts";
 import { mergeRequestName } from "../lib/naming.ts";
 import { anyValue, arr, num, obj, str } from "../lib/schema.ts";
 import { type AnyTool, defineTool } from "../lib/tool.ts";
+import { assertFinalAction, assertTicketMr, assertUpstreamReady } from "../lib/workflow.ts";
+import { assertVerifiedRevision } from "../lib/verification.ts";
+import { publishOnce } from "../lib/operations.ts";
+import { readReceipt, receiptPath, writeReceipt } from "../lib/receipts.ts";
+import { patchTicketState } from "../lib/store.ts";
+import { git } from "../lib/git.ts";
+import { worktreePath } from "../lib/paths.ts";
 
 export const gitlabTools: AnyTool[] = [
   defineTool({
@@ -35,15 +43,17 @@ export const gitlabTools: AnyTool[] = [
       "Cree une merge request en brouillon. Reserve au finalizer. Idempotent : si une MR ouverte existe deja sur cette branche, elle est mise a jour au lieu d'etre dupliquee.",
     inputSchema: obj(
       {
+        ticketId: str("Cle Jira du plan approuve."),
         repo: str("Nom du repo."),
         sourceBranch: str("Branche du worktree."),
         title: str("Titre complet. Le prefixe Draft: est ajoute s'il manque."),
         description: str("Description, en francais, reprenant les arbitrages et referencant les MR des autres repos."),
         targetBranch: str("Branche cible. Omise, la baseBranch du registre est utilisee."),
       },
-      ["repo", "sourceBranch", "title", "description"],
+      ["ticketId", "repo", "sourceBranch", "title", "description"],
     ),
     handler: async (input: {
+      ticketId: string;
       repo: string;
       sourceBranch: string;
       title: string;
@@ -51,6 +61,12 @@ export const gitlabTools: AnyTool[] = [
       targetBranch?: string;
     }) => {
       const repo = findRepo(input.repo);
+      await assertFinalAction(input.ticketId, repo.name);
+      const branch = await git(worktreePath(input.ticketId, repo.name), ["rev-parse", "--abbrev-ref", "HEAD"]);
+      if (input.sourceBranch !== branch || (input.targetBranch && input.targetBranch !== repo.baseBranch)) fail("Les branches de la MR doivent correspondre au worktree et au registre.");
+      const pushed = readReceipt<{ branch: string; sha: string }>(receiptPath(input.ticketId, repo.name, "branch.json"));
+      const sha = await assertVerifiedRevision(input.ticketId, repo);
+      if (pushed?.branch !== branch || pushed.sha !== sha) fail("Pousse d'abord le commit verifie avec push-branch.");
       const mr = await gl.createMergeRequest({
         projectPath: repo.gitlabProject,
         sourceBranch: input.sourceBranch,
@@ -58,6 +74,8 @@ export const gitlabTools: AnyTool[] = [
         title: input.title,
         description: input.description,
       });
+      writeReceipt(receiptPath(input.ticketId, repo.name, "mr.json"), { iid: mr.iid, url: mr.web_url, branch });
+      patchTicketState(input.ticketId, { publication: { mergeRequests: [{ repo: repo.name, iid: mr.iid, url: mr.web_url }] } });
       return { repo: repo.name, iid: mr.iid, url: mr.web_url, title: mr.title, draft: mr.title.startsWith("Draft: ") };
     },
   }),
@@ -68,17 +86,21 @@ export const gitlabTools: AnyTool[] = [
       "Modifie une merge request existante. Sert surtout a completer les references croisees une fois que les N MR du ticket sont creees.",
     inputSchema: obj(
       {
+        ticketId: str("Cle Jira du plan approuve."),
         repo: str("Nom du repo."),
         iid: num("Numero de la MR."),
         title: str("Nouveau titre."),
         description: str("Nouvelle description complete."),
         patch: anyValue("Champs bruts de l'API GitLab, pour ce que les deux champs ci-dessus ne couvrent pas."),
       },
-      ["repo", "iid"],
+      ["ticketId", "repo", "iid"],
     ),
-    handler: async (input: { repo: string; iid: number; title?: string; description?: string; patch?: Record<string, unknown> }) => {
+    handler: async (input: { ticketId: string; repo: string; iid: number; title?: string; description?: string; patch?: Record<string, unknown> }) => {
+      await assertTicketMr(input.ticketId, input.repo, input.iid);
+      const allowed = new Set(["labels", "reviewer_ids", "assignee_ids"]);
+      if (Object.keys(input.patch ?? {}).some((key) => !allowed.has(key))) fail("Ce patch MR contient un champ non autorise.", "Seuls labels, reviewer_ids et assignee_ids sont admis en plus du titre et de la description.");
       const body: Record<string, unknown> = { ...input.patch };
-      if (input.title) body.title = input.title;
+      if (input.title) body.title = loadConfig().gitlab.mrDraft && !input.title.startsWith("Draft: ") ? `Draft: ${input.title}` : input.title;
       if (input.description) body.description = input.description;
       const mr = await gl.updateMergeRequest(findRepo(input.repo).gitlabProject, input.iid, body);
       return { iid: mr.iid, url: mr.web_url, title: mr.title };
@@ -116,33 +138,41 @@ export const gitlabTools: AnyTool[] = [
     name: "create-gitlab-note",
     description: "Ecrit une note sur une merge request. Tout texte publie passe d'abord par writer-voice-tone.",
     inputSchema: obj(
-      { repo: str("Nom du repo."), iid: num("Numero de la MR."), body: str("Corps de la note, en francais.") },
-      ["repo", "iid", "body"],
+      { ticketId: str("Cle Jira."), operationKey: str("Identifiant stable de cette note, conserve lors des reprises."), repo: str("Nom du repo."), iid: num("Numero de la MR."), body: str("Corps de la note, en francais.") },
+      ["ticketId", "operationKey", "repo", "iid", "body"],
     ),
-    handler: async ({ repo, iid, body }: { repo: string; iid: number; body: string }) =>
-      gl.createNote(findRepo(repo).gitlabProject, iid, body),
+    handler: async ({ ticketId, operationKey, repo, iid, body }: { ticketId: string; operationKey: string; repo: string; iid: number; body: string }) => {
+      await assertTicketMr(ticketId, repo, iid);
+      return publishOnce(ticketId, `gitlab-note:${repo}:${iid}:${operationKey}`, { body }, () => gl.createNote(findRepo(repo).gitlabProject, iid, body));
+    },
   }),
 
   defineTool({
     name: "create-gitlab-tag",
     description:
-      "Pose un tag cote remote, sans passer par le worktree. A n'utiliser que quand le tag doit exister sur le remote sans commit local correspondant ; sinon push-tag suffit et reste plus proche du depot.",
+      "Pose un tag via l'API au point 10.7, sur le SHA verifie localement et deja accessible au remote. Pour envoyer aussi le commit local, utilise push-tag.",
     inputSchema: obj(
       {
+        ticketId: str("Cle Jira du plan approuve."),
         repo: str("Nom du repo."),
         tag: str("Nom du tag."),
-        ref: str("Commit ou branche cible."),
+        ref: str("SHA complet du commit local verifie, deja present sur le remote."),
         message: str("Message annote."),
       },
-      ["repo", "tag", "ref"],
+      ["ticketId", "repo", "tag", "ref"],
     ),
-    handler: async (input: { repo: string; tag: string; ref: string; message?: string }) => {
-      const project = findRepo(input.repo).gitlabProject;
+    handler: async (input: { ticketId: string; repo: string; tag: string; ref: string; message?: string }) => {
+      const repo = findRepo(input.repo);
+      assertUpstreamReady(input.ticketId, repo.name);
+      const sha = await assertVerifiedRevision(input.ticketId, repo);
+      if (input.ref !== sha) fail("Le tag distant doit viser le SHA complet effectivement verifie.");
+      const project = repo.gitlabProject;
       const existing = await gl.listTags(project);
       if (existing.includes(input.tag)) {
         return { created: false, reason: `Le tag ${input.tag} existe deja cote remote.`, existingTags: existing.slice(0, 20) };
       }
       await gl.createTag(project, input.tag, input.ref, input.message ?? input.tag);
+      writeReceipt(receiptPath(input.ticketId, repo.name, "upstream.json"), { tag: input.tag, sha });
       return { created: true, tag: input.tag };
     },
   }),
@@ -166,30 +196,48 @@ export const gitlabTools: AnyTool[] = [
       "Attend le verdict des jobs declares dans ciJobsToWatch, avec timeout. Le verdict porte sur ces jobs, pas sur le statut global du pipeline. Un timeout n'est pas un echec de CI : c'est une escalade a l'humain.",
     inputSchema: obj(
       {
+        ticketId: str("Cle Jira. Requis dans un run pour enregistrer la preuve de publication amont."),
         repo: str("Nom du repo."),
         ref: str("Branche ou tag a suivre."),
         jobs: arr("Jobs a suivre. Omis, ceux du registre sont utilises.", str("Nom de job.")),
         timeoutSeconds: num("Delai maximum. Omis, celui d'autopilot.yaml est utilise."),
         pollSeconds: num("Intervalle entre deux interrogations du pipeline. 15 par defaut."),
+        expectedSha: str("SHA du commit publie. Un pipeline d'une autre revision ne valide jamais celle-ci.", { pattern: "^[a-fA-F0-9]{7,40}$" }),
       },
       ["repo", "ref"],
     ),
-    handler: async (input: { repo: string; ref: string; jobs?: string[]; timeoutSeconds?: number; pollSeconds?: number }) => {
+    handler: async (input: { ticketId?: string; repo: string; ref: string; jobs?: string[]; timeoutSeconds?: number; pollSeconds?: number; expectedSha?: string }, context) => {
       const repo = findRepo(input.repo);
+      let expectedSha = input.expectedSha;
+      if (input.ticketId) {
+        assertUpstreamReady(input.ticketId, repo.name);
+        const upstream = readReceipt<{ tag: string; sha: string }>(receiptPath(input.ticketId, repo.name, "upstream.json"));
+        if (!upstream || upstream.tag !== input.ref) fail("Aucun tag amont correspondant n'a ete publie par ce run.");
+        if (expectedSha && expectedSha !== upstream.sha) fail("Le SHA demande differe de celui du tag publie.");
+        expectedSha = upstream.sha;
+      }
+      if (input.jobs && repo.ciJobsToWatch.some((job) => !input.jobs?.includes(job))) {
+        fail("Le suivi CI ne peut pas retirer un job requis par le registre.");
+      }
       const result = await gl.watchPipeline({
         projectPath: repo.gitlabProject,
         ref: input.ref,
         jobs: input.jobs ?? repo.ciJobsToWatch,
         timeoutSeconds: input.timeoutSeconds ?? loadConfig().timeouts.ciPipelineSeconds,
         pollSeconds: input.pollSeconds ?? 15,
+        expectedSha,
+        onProgress: context.heartbeat,
+      });
+      if (input.ticketId) writeReceipt(receiptPath(input.ticketId, repo.name, "upstream-ci.json"), {
+        tag: input.ref, sha: result.pipeline?.sha ?? null, passed: result.verdict === "success", at: new Date().toISOString(),
       });
       return {
         ...result,
         watched: input.jobs ?? repo.ciJobsToWatch,
-        escalate: result.verdict === "timeout",
+        escalate: result.verdict !== "success",
         note:
-          result.verdict === "timeout"
-            ? "Timeout : appelle escalate-to-human, ne bumpe pas l'aval sur un pipeline dont on ne sait rien."
+          result.verdict !== "success"
+            ? "CI non validee : appelle escalate-to-human, ne bumpe pas l'aval sans tous les jobs requis au vert."
             : undefined,
       };
     },

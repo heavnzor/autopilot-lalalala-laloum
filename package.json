@@ -1,12 +1,14 @@
 {
   "name": "autopilot",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
+  "packageManager": "pnpm@10.17.1",
   "license": "MIT",
   "author": "Elie Laloum <pro@elielaloum.com>",
+  "contributors": [{ "name": "heavnzor", "url": "https://github.com/heavnzor" }],
   "repository": {
     "type": "git",
-    "url": "https://gitlab.com/e.laloum/autopilot.git"
+    "url": "https://github.com/heavnzor/autopilot-lalalala-laloum.git"
   },
   "type": "module",
   "description": "Developpement autonome depuis un ticket Jira : cadrage, TDD adversarial repo par repo, capitalisation memoire, publication.",
@@ -14,6 +16,8 @@
     "test": "node --test --test-concurrency=4 \"tests/unit/*.test.ts\"",
     "test:workflow": "node --test --test-concurrency=1 --test-timeout=600000 \"tests/workflow/*.test.ts\"",
     "test:all": "pnpm test && pnpm test:workflow",
+    "verify": "pnpm typecheck && pnpm test:all && pnpm live:build",
+    "demo": "node tools/live-shell/demo/start.ts",
     "typecheck": "tsc --noEmit && pnpm --dir tools/live-shell typecheck",
     "eval": "claude plugin eval ./plugins/autopilot --ablation with-without --mocks record --allow-real-servers --allow-tools 'mcp__plugin_autopilot_autopilot__*' --runs 3",
     "live:dev": "pnpm --dir tools/live-shell dev",
@@ -28,6 +32,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.21.0",
+    "ajv": "^8.17.1",
     "valibot": "^1.1.0",
     "yaml": "^2.8.0"
   },

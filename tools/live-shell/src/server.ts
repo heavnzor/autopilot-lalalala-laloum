@@ -64,9 +64,14 @@ export default {
 };
 
 async function rpc(pathname: string, request: Request): Promise<Response> {
+  const origin = request.headers.get("origin");
+  if (origin && origin !== new URL(request.url).origin) return json({ error: "Origine etrangere refusee" }, 403);
+  if (request.method === "POST" && !request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
+    return json({ error: "application/json attendu" }, 415);
+  }
   switch (pathname) {
     case "/rpc/health":
-      return json({ ok: true, at: new Date().toISOString() });
+      return json({ ok: true, ticketId: process.env.AUTOPILOT_TICKET_ID ?? null, at: new Date().toISOString() });
 
     case "/rpc/state": {
       replay();
@@ -93,7 +98,8 @@ async function rpc(pathname: string, request: Request): Promise<Response> {
         askedBy?: string | null;
       } | null;
 
-      const questions = (body?.questions ?? [])
+      if (!Array.isArray(body?.questions) || body.questions.some((entry) => entry?.options !== undefined && !Array.isArray(entry.options))) return json({ error: "Lot de questions invalide" }, 400);
+      const questions = body.questions
         .filter((entry) => typeof entry?.question === "string" && entry.question.trim())
         .map((entry, index) => ({
           key: entry.key?.trim() || `q${index + 1}`,
@@ -134,7 +140,8 @@ async function rpc(pathname: string, request: Request): Promise<Response> {
         askedBy?: string | null;
       } | null;
 
-      const repos = (body?.repos ?? [])
+      if (!Array.isArray(body?.repos) || body.repos.some((entry) => entry?.changes !== undefined && !Array.isArray(entry.changes))) return json({ error: "Plan invalide" }, 400);
+      const repos = body.repos
         .filter((entry) => typeof entry?.repo === "string" && entry.repo.trim())
         .map((entry) => ({
           repo: String(entry.repo).trim(),
@@ -180,7 +187,7 @@ async function rpc(pathname: string, request: Request): Promise<Response> {
         id?: string;
         answers?: Record<string, string>;
       } | null;
-      if (!body?.id || typeof body.answers !== "object" || body.answers === null) {
+      if (!body?.id || typeof body.answers !== "object" || body.answers === null || Array.isArray(body.answers) || Object.values(body.answers).some((value) => typeof value !== "string")) {
         return json({ error: "`id` et `answers` requis" }, 400);
       }
       const result = answer(body.id, body.answers as Record<string, string>);
@@ -243,7 +250,18 @@ function json(data: unknown, status = 200): Response {
 
 async function safeJson(request: Request): Promise<unknown> {
   try {
-    return await request.json();
+    const reader = request.body?.getReader();
+    if (!reader) return null;
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.length;
+      if (size > 1024 * 1024) { await reader.cancel(); return null; }
+      chunks.push(value);
+    }
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
   } catch {
     return null;
   }

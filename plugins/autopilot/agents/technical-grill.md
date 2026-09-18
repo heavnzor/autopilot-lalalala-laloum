@@ -74,7 +74,7 @@ Les arbitrages techniques, ecrits au fil de l'eau :
 
 ```json
 { "arbitrages": { "technical": [
-  { "at": "2026-09-15T09:52:00+02:00",
+  { "id": "extension-composant", "at": "2026-09-15T09:52:00+02:00",
     "question": "On etend le composant existant ou on en cree un second ?",
     "answer": "On etend, avec une prop optionnelle.",
     "why": "Trois appelants actuels, aucun ne veut la borne figee." }
@@ -83,6 +83,9 @@ Les arbitrages techniques, ecrits au fil de l'eau :
 
 Rappelle aussi au `planner` quels skills tu as charges et ce qu'ils imposent : c'est lui qui
 devra les traduire en etapes de plan.
+
+Chaque decision porte un `id` stable, reutilise quand elle est corrigee. Une
+nouvelle decision prend un nouvel identifiant, sans remplacer les precedentes.
 
 ## Obligations
 

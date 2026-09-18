@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 /**
  * Les faux repos sont de **vrais depots git**, avec un remote **bare** local.
  *
- * `create-worktree`, `create-commit` et `push-tag` s'executent donc pour de
+ * `create-worktree`, `create-code-commit` et `push-tag` s'executent donc pour de
  * vrai, et les tests verifient l'etat reel du depot. Mocker git reviendrait a ne
  * plus tester la partie la plus fragile du systeme.
  */

@@ -11,6 +11,7 @@ import { qualityTools } from "./tools/quality.ts";
 import { slackTools } from "./tools/slack.ts";
 import { stateTools } from "./tools/state.ts";
 import { voiceTools } from "./tools/voice.ts";
+import { workflowTools } from "./tools/workflow.ts";
 
 export const ALL_TOOLS: readonly AnyTool[] = [
   ...configTools,
@@ -25,6 +26,7 @@ export const ALL_TOOLS: readonly AnyTool[] = [
   ...figmaTools,
   ...voiceTools,
   ...humanTools,
+  ...workflowTools,
 ];
 
 export function toolByName(name: string): AnyTool | undefined {
@@ -81,6 +83,7 @@ export const TOOLS_BY_AGENT: Readonly<Record<string, readonly string[]>> = {
   ],
 
   orchestrator: [
+    "advance-workflow",
     "acquire-ticket-lock",
     "release-ticket-lock",
     "write-store-ticket",
@@ -105,7 +108,7 @@ export const TOOLS_BY_AGENT: Readonly<Record<string, readonly string[]>> = {
     "get-repositories-registry",
     "get-memory",
     "get-ticket",
-    "create-commit",
+    "create-test-commit",
     "generate-commit-message",
     "push-live-mode-event",
     "escalate-to-human",
@@ -130,7 +133,8 @@ export const TOOLS_BY_AGENT: Readonly<Record<string, readonly string[]>> = {
     "get-memory",
     "get-repositories-registry",
     "generate-commit-message",
-    "create-commit",
+    "create-code-commit",
+    "get-repo-diff",
     "run-lint",
     "run-typecheck",
     "monorepo-filter",
@@ -154,6 +158,7 @@ export const TOOLS_BY_AGENT: Readonly<Record<string, readonly string[]>> = {
   ],
 
   "code-adversary": [
+    "get-repo-diff",
     "get-memory",
     "get-ticket",
     "get-repositories-registry",

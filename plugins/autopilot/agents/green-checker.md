@@ -47,6 +47,12 @@ deja ; ton travail est de sortir la ligne qui compte et de dire ce qu'elle veut 
 
 ## Cibler, et lire ce que la suite a rendu
 
+Le ciblage sert au diagnostic. **Avant le verdict final, relance toutes les
+commandes declarees sans `paths`, `packages` ni `filter`, sur le dernier commit
+propre.** `focus` peut limiter le texte rendu sans limiter les tests executes.
+Le retour `verification` doit porter ce SHA et une verification complete.
+Un changement ou un commit apres ce passage impose de recommencer les checks.
+
 `paths` joue les fichiers qui t'interessent — la facon de les passer au runner est declaree
 par le repo, tu n'as pas a la connaitre, et un refus veut dire que ce type ne se cible pas
 ici. `focus` prend une expression reguliere et ne rend que les lignes qui matchent, avec
@@ -65,9 +71,11 @@ resultat n'est pas verifiable.
   celle ou tombent tes fichiers. Le retour porte un `advice` et un `logPath` vers la sortie
   complete. Relance avec `focus` plutot que de conclure.
 - **`stoppedBy: "silence"`** — le process etait vivant et n'ecrivait plus rien. C'est la
-  troisieme famille, toujours : un runtime, une base, un port. Jamais le code.
-- **`stoppedBy: "timeout"`** — la commande ecrivait encore au plafond. Celle-la est
-  reellement longue, et c'est une information sur le repo, pas sur le diff.
+  signature d'une attente possible, pas la preuve de sa cause. Verifie le runtime,
+  puis un blocage du runner ou du code.
+- **`stoppedBy: "timeout"`** — le plafond a ete atteint sans verdict.
+- **`stoppedBy: "output-limit"`** — le runner a depasse la limite de sortie ; le
+  journal est incomplet et ne peut pas valider la suite.
 
 En cas de doute sur l'environnement, `preflight-repo` tranche en une commande.
 

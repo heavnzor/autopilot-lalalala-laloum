@@ -15,7 +15,7 @@ export interface RunResult {
    * ce qui est la signature d'une attente d'infrastructure — un `docker pull`
    * sans daemon, un conteneur qui ne demarre pas — et pas d'un test lent.
    */
-  readonly stoppedBy: "exit" | "timeout" | "silence";
+  readonly stoppedBy: "exit" | "timeout" | "silence" | "output-limit";
   readonly durationMs: number;
   /** Delai ecoule depuis la derniere ligne recue, au moment ou on a rendu. */
   readonly silentForMs: number;
@@ -83,6 +83,7 @@ export interface RunOptions {
    * apres coup.
    */
   readonly onProgress?: (message: string) => void;
+  readonly maxOutputBytes?: number;
 }
 
 /**
@@ -97,6 +98,8 @@ export function run(command: string, options: RunOptions): Promise<RunResult> {
   const timeoutMs = options.timeoutMs ?? timeouts.commandSeconds * 1000;
   const silenceMs = options.silenceMs ?? timeouts.commandSilenceSeconds * 1000;
   const keepLines = options.keepLines ?? 120;
+  const maxOutputBytes = options.maxOutputBytes ?? loadConfig().limits?.commandOutputBytes ?? 8 * 1024 * 1024;
+  if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes <= 0) throw new Error("Limite de sortie invalide.");
   const startedAt = Date.now();
 
   return new Promise<RunResult>((resolve) => {
@@ -147,9 +150,11 @@ export function run(command: string, options: RunOptions): Promise<RunResult> {
     let stderr = "";
     let lastOutputAt = startedAt;
     let maxSilentMs = 0;
-    let stoppedBy: "exit" | "timeout" | "silence" = "exit";
+    let stoppedBy: RunResult["stoppedBy"] = "exit";
+    let outputBytes = 0;
 
     const timer = setTimeout(() => {
+      if (stoppedBy !== "exit") return;
       stoppedBy = "timeout";
       killTree();
     }, timeoutMs);
@@ -165,6 +170,7 @@ export function run(command: string, options: RunOptions): Promise<RunResult> {
      * daemon la. Le silence le disait des la premiere minute.
      */
     const watchdog = setInterval(() => {
+      if (stoppedBy !== "exit") return;
       const silentFor = Date.now() - lastOutputAt;
       if (silenceMs > 0 && silentFor >= silenceMs) {
         stoppedBy = "silence";
@@ -176,11 +182,20 @@ export function run(command: string, options: RunOptions): Promise<RunResult> {
     }, Math.max(1000, Math.min(PROGRESS_EVERY_MS, silenceMs > 0 ? silenceMs / 2 : PROGRESS_EVERY_MS)));
 
     const record = (chunk: Buffer, into: "out" | "err"): void => {
+      if (stoppedBy === "output-limit") return;
       const now = Date.now();
       maxSilentMs = Math.max(maxSilentMs, now - lastOutputAt);
       lastOutputAt = now;
-      if (into === "out") stdout += chunk.toString();
-      else stderr += chunk.toString();
+      const remaining = maxOutputBytes - outputBytes;
+      const kept = chunk.subarray(0, Math.max(0, remaining));
+      outputBytes += kept.length;
+      if (into === "out") stdout += kept.toString();
+      else stderr += kept.toString();
+      if (chunk.length > remaining) {
+        stoppedBy = "output-limit";
+        stderr += `\nSortie arretee a ${maxOutputBytes} octets ; le journal est incomplet.\n`;
+        killTree();
+      }
     };
 
     child.stdout?.on("data", (chunk: Buffer) => record(chunk, "out"));
@@ -221,6 +236,7 @@ export function run(command: string, options: RunOptions): Promise<RunResult> {
     });
 
     const finish = (code: number | null): void => {
+      if (settled) return;
       const focusedOut = focusOn(stdout, options.focus);
       const focusedErr = focusOn(stderr, options.focus);
       const out = clip(focusedOut.text, keepLines);
@@ -231,7 +247,7 @@ export function run(command: string, options: RunOptions): Promise<RunResult> {
         options.focus === undefined ? null : focusedOut.matched + focusedErr.matched;
       done({
         exitCode: stoppedBy === "exit" ? (code ?? 1) : 124,
-        timedOut: stoppedBy !== "exit",
+        timedOut: stoppedBy === "timeout" || stoppedBy === "silence",
         stoppedBy,
         stdout: out.text,
         stderr: err.text,
@@ -293,16 +309,16 @@ export function killRunningCommands(): void {
  */
 export function stopReason(result: RunResult): string | null {
   if (result.stoppedBy === "exit") return null;
+  if (result.stoppedBy === "output-limit") return "Commande interrompue : volume de sortie excessif. Le resultat ne valide aucun test et le journal est incomplet.";
   if (result.stoppedBy === "silence") {
     return (
       `Commande abandonnee apres ${Math.round(result.silentForMs / 1000)}s sans la moindre sortie. ` +
-      "Un process vivant mais muet, c'est une attente d'infrastructure, pas un test lent : " +
-      "verifie le runtime de conteneurs, la base et les ports avant de soupconner le code."
+      "Verifie l'infrastructure, puis un blocage du runner ou du code. Le silence seul n'identifie pas la cause."
     );
   }
   return (
     `Commande abandonnee au plafond de ${Math.round(result.durationMs / 1000)}s. ` +
-    "Elle ecrivait encore : c'est une commande reellement longue, pas un blocage."
+    "Inspecte les dernieres sorties : ce plafond ne distingue pas a lui seul une commande lente d'un blocage."
   );
 }
 

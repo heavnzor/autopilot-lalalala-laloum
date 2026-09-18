@@ -144,7 +144,7 @@ describe("zones d'ecriture", () => {
   const writers = new Set(["test-writer", "developer", "memory-writer", "orchestrator", "finalizer"]);
 
   it("les agents en lecture seule n'ont aucun tool d'ecriture ni Write / Edit", () => {
-    const writeTools = ["create-memory", "write-memory", "delete-memory", "create-commit", "push-branch", "push-tag"];
+    const writeTools = ["create-memory", "write-memory", "delete-memory", "create-code-commit", "create-test-commit", "push-branch", "push-tag"];
     for (const agent of AGENTS) {
       if (writers.has(agent.name)) continue;
       for (const tool of writeTools) {
@@ -152,6 +152,7 @@ describe("zones d'ecriture", () => {
       }
       assert.ok(!agent.tools.includes("Write"), `${agent.name} peut Write`);
       assert.ok(!agent.tools.includes("Edit"), `${agent.name} peut Edit`);
+      assert.ok(!agent.tools.includes("Bash"), `${agent.name} peut Bash`);
     }
   });
 
@@ -184,8 +185,12 @@ describe("zones d'ecriture", () => {
     assert.ok(TOOLS_BY_AGENT.orchestrator?.includes("push-tag"));
   });
 
-  it("le developer n'a aucun moyen d'ecrire un test", () => {
-    // Il a Write et Edit pour le code ; le garde-fou est au commit.
+  it("le developer ne peut pas choisir la zone de son outil de commit", () => {
+    const developer = AGENTS.find((agent) => agent.name === "developer")!;
+    assert.ok(!developer.tools.includes("Bash"));
+    assert.ok(developer.tools.includes(`${PREFIX}create-code-commit`));
+    assert.ok(!developer.tools.includes(`${PREFIX}create-test-commit`));
+    assert.ok(!TOOL_NAMES.has("create-commit"));
     assert.ok(isTestFile("src/features/lab/filter.spec.ts"));
     assert.ok(isTestFile("tests/unit/filter.test.ts"));
     assert.ok(isTestFile("__tests__/filter.ts"));

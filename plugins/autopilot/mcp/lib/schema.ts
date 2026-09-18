@@ -1,3 +1,4 @@
+import { Ajv, type ValidateFunction } from "ajv";
 import { ToolError } from "./errors.ts";
 
 /**
@@ -41,61 +42,19 @@ export function anyValue(description: string): JsonSchema {
   return { description };
 }
 
+// Le schema annonce au client est aussi celui qui s'applique. Le validateur
+// precedent ignorait additionalProperties, pattern et les bornes numeriques.
+const ajv = new Ajv({ allErrors: true, strict: true, strictNumbers: true, ownProperties: true });
+const validators = new WeakMap<JsonSchema, ValidateFunction>();
+
 export function validate(schema: JsonSchema, value: unknown, path = "input"): void {
-  if (schema.enum && Array.isArray(schema.enum) && !schema.enum.includes(value as never)) {
-    throw new ToolError(`${path} : valeur ${JSON.stringify(value)} hors des valeurs admises.`, `Admis : ${schema.enum.join(", ")}`);
+  let check = validators.get(schema);
+  if (!check) {
+    check = ajv.compile(schema);
+    validators.set(schema, check);
   }
-
-  const type = schema.type as string | undefined;
-  if (!type) return;
-
-  if (value === null || value === undefined) {
-    throw new ToolError(`${path} : champ requis manquant.`);
+  if (!check(value)) {
+    const issues = (check.errors ?? []).map((issue) => `${path}${issue.instancePath} : ${issue.message}`).join(" ; ");
+    throw new ToolError(issues || `${path} : entree invalide.`);
   }
-
-  switch (type) {
-    case "string":
-      if (typeof value !== "string") throw new ToolError(`${path} : chaine attendue, recu ${typeName(value)}.`);
-      break;
-    case "number":
-      if (typeof value !== "number" || Number.isNaN(value)) {
-        throw new ToolError(`${path} : nombre attendu, recu ${typeName(value)}.`);
-      }
-      break;
-    case "boolean":
-      if (typeof value !== "boolean") throw new ToolError(`${path} : booleen attendu, recu ${typeName(value)}.`);
-      break;
-    case "array": {
-      if (!Array.isArray(value)) throw new ToolError(`${path} : liste attendue, recu ${typeName(value)}.`);
-      const items = schema.items as JsonSchema | undefined;
-      if (items) value.forEach((entry, index) => validate(items, entry, `${path}[${index}]`));
-      break;
-    }
-    case "object": {
-      if (typeof value !== "object" || Array.isArray(value)) {
-        throw new ToolError(`${path} : objet attendu, recu ${typeName(value)}.`);
-      }
-      const properties = (schema.properties ?? {}) as Record<string, JsonSchema>;
-      const required = (schema.required ?? []) as string[];
-      const record = value as Record<string, unknown>;
-      for (const key of required) {
-        if (record[key] === undefined || record[key] === null) {
-          throw new ToolError(`${path}.${key} : champ requis manquant.`);
-        }
-      }
-      for (const [key, entry] of Object.entries(record)) {
-        const child = properties[key];
-        if (child && entry !== undefined && entry !== null) validate(child, entry, `${path}.${key}`);
-      }
-      break;
-    }
-    default:
-      break;
-  }
-}
-
-function typeName(value: unknown): string {
-  if (value === null) return "null";
-  if (Array.isArray(value)) return "liste";
-  return typeof value;
 }

@@ -76,9 +76,13 @@ flag une seule fois et laisse les dix lectures existantes intactes. »
 ```yaml
 tests:
   - id: T1
+    repo: web-app
+    purpose: new-behavior
     criterion: Le filtre renvoie les feuilles du mois en cours
     status: pending
   - id: T2
+    repo: web-app
+    purpose: regression
     criterion: Une periode vide renvoie une liste vide, pas une erreur
     status: pending
 ```
@@ -93,11 +97,17 @@ tests:
 ```yaml
 code:
   - id: C1
+    repo: web-app
     criterion: Chemin d'erreur couvert quand la periode est invalide
     status: pending
 ```
 
 ## Ce qui rend une ligne observable
+
+Chaque ligne porte `repo`, y compris dans un plan mono-repo. Une nouvelle
+decision a un identifiant stable ; les changements de statut ne changent ni cet
+identifiant ni le critere approuve. Distingue les comportements nouveaux des
+non-regressions qui doivent deja passer.
 
 > ❌ `Le composant est propre`
 > ✅ `range.tsx n'exporte plus de borne haute figee, et les trois appelants compilent sans changement`

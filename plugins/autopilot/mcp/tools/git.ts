@@ -18,6 +18,9 @@ import { branchName, slugify } from "../lib/naming.ts";
 import { worktreePath } from "../lib/paths.ts";
 import { arr, bool, enumOf, obj, str } from "../lib/schema.ts";
 import { type AnyTool, defineTool } from "../lib/tool.ts";
+import { assertFinalAction, assertUpstreamReady } from "../lib/workflow.ts";
+import { assertVerifiedRevision } from "../lib/verification.ts";
+import { readReceipt, receiptPath, writeReceipt } from "../lib/receipts.ts";
 
 /**
  * Un fichier de test se reconnait a son chemin ou a son extension. Le
@@ -131,10 +134,11 @@ export const gitTools: AnyTool[] = [
       const repo = findRepo(name);
       const path = worktreePath(ticketId, repo.name);
       if (!existsSync(path)) return { removed: false, reason: "Worktree deja absent." };
+      if (!readReceipt(receiptPath(ticketId, repo.name, "mr.json"))) fail("Un worktree ne se retire qu'apres creation de sa MR.");
 
       const dirty = (await git(path, ["status", "--porcelain"])) !== "";
-      if (dirty && !force) {
-        fail(`Worktree sale : ${path}.`, "Commite ou passe `force: true` si la perte est assumee.");
+      if (dirty) {
+        fail(`Worktree sale : ${path}.`, "Sauve ses modifications avant le nettoyage. Le tool ne detruit pas du travail non commite.");
       }
       const source = repoRoot(repo);
       await gitAllowFailure(source, ["worktree", "remove", path, ...(force ? ["--force"] : [])]);
@@ -205,26 +209,24 @@ export const gitTools: AnyTool[] = [
     },
   }),
 
-  defineTool({
-    name: "create-commit",
+  ...(["developer", "test-writer"] as const).map((role) => defineTool({
+    name: role === "developer" ? "create-code-commit" : "create-test-commit",
     description:
-      "Commit atomique dans le worktree. A appeler APRES CHAQUE modification : un crash en cours de repo ne doit jamais faire perdre le travail deja fait. Le role declare est verifie — un developer qui tente de commiter un fichier de test est refuse.",
+      `Commit atomique dans le worktree, reserve au ${role}. La zone est fixee par le tool et ne peut pas etre changee dans ses arguments. A appeler apres chaque modification.`,
     inputSchema: obj(
       {
         ticketId: str("Cle Jira."),
         repo: str("Nom du repo."),
         message: str("Message complet, tel que rendu par generate-commit-message."),
         paths: arr("Fichiers a inclure. Omis, tout ce qui est modifie est commite.", str("Chemin relatif au worktree.")),
-        role: enumOf("Qui commite. Determine la zone d'ecriture autorisee.", ["developer", "test-writer", "orchestrator"]),
       },
-      ["ticketId", "repo", "message", "role"],
+      ["ticketId", "repo", "message"],
     ),
     handler: async (input: {
       ticketId: string;
       repo: string;
       message: string;
       paths?: string[];
-      role: "developer" | "test-writer" | "orchestrator";
     }) => {
       const repo = findRepo(input.repo);
       const cwd = worktreePath(input.ticketId, repo.name);
@@ -234,12 +236,12 @@ export const gitTools: AnyTool[] = [
       const staged = (await git(cwd, ["diff", "--cached", "--name-only"])).split("\n").filter(Boolean);
       if (staged.length === 0) return { committed: false, reason: "Rien a commiter." };
 
-      const violations = checkZone(input.role, staged);
+      const violations = checkZone(role, staged);
       if (violations.length > 0) {
         await gitAllowFailure(cwd, ["reset"]);
         fail(
-          `Le role ${input.role} n'ecrit pas dans cette zone : ${violations.join(", ")}.`,
-          input.role === "developer"
+          `Le role ${role} n'ecrit pas dans cette zone : ${violations.join(", ")}.`,
+          role === "developer"
             ? "Le developer ne touche jamais un test. Remonte une zone non couverte ou un test conteste a l'orchestrateur."
             : "Le test-writer n'ecrit que des fichiers de test.",
         );
@@ -268,7 +270,7 @@ export const gitTools: AnyTool[] = [
       const sha = await headSha(cwd);
       return { committed: true, commitSha: sha, files, repo: repo.name };
     },
-  }),
+  })),
 
   defineTool({
     name: "push-branch",
@@ -279,9 +281,13 @@ export const gitTools: AnyTool[] = [
       const repo = findRepo(name);
       const cwd = worktreePath(ticketId, repo.name);
       if (!existsSync(cwd)) fail(`Worktree absent : ${cwd}.`);
+      await assertFinalAction(ticketId, repo.name);
+      const sha = await assertVerifiedRevision(ticketId, repo);
       const branch = await currentBranchOf(cwd);
-      await git(cwd, ["push", "--force-with-lease", "--set-upstream", "origin", branch], 300_000);
-      return { pushed: true, branch, repo: repo.name, sha: await headSha(cwd) };
+      if (branch === repo.baseBranch || branch === "HEAD") fail("La branche de base ne se publie pas comme une branche de ticket.");
+      await git(cwd, ["push", "origin", `${sha}:refs/heads/${branch}`], 300_000);
+      writeReceipt(receiptPath(ticketId, repo.name, "branch.json"), { branch, sha });
+      return { pushed: true, branch, repo: repo.name, sha };
     },
   }),
 
@@ -303,18 +309,38 @@ export const gitTools: AnyTool[] = [
       const cwd = worktreePath(input.ticketId, repo.name);
       if (!existsSync(cwd)) fail(`Worktree absent : ${cwd}.`);
 
+      assertUpstreamReady(input.ticketId, repo.name);
+      const sha = await assertVerifiedRevision(input.ticketId, repo);
+      await git(cwd, ["check-ref-format", `refs/tags/${input.tag}`]);
+
       const existing = await listTags(cwd);
       if (existing.includes(input.tag)) {
-        fail(
-          `Le tag ${input.tag} existe deja.`,
-          "Republier la meme version, c'est un rejet du registre ou un cache qui sert l'ancien artefact. Incremente le suffixe.",
-        );
+        const tagged = await git(cwd, ["rev-parse", `refs/tags/${input.tag}^{commit}`]);
+        if (tagged !== sha) fail(`Le tag ${input.tag} existe deja sur un autre commit.`, "Incremente le suffixe, ne deplace jamais une version publiee.");
+      } else {
+        await git(cwd, ["tag", "-a", input.tag, sha, "-m", input.message ?? `${input.tag} (${input.ticketId})`]);
       }
-
-      await git(cwd, ["tag", "-a", input.tag, "-m", input.message ?? `${input.tag} (${input.ticketId})`]);
       // `refs/tags/<tag>` et rien d'autre : aucune branche ne part avec.
       await git(cwd, ["push", "origin", `refs/tags/${input.tag}`], 300_000);
-      return { pushed: true, tag: input.tag, sha: await headSha(cwd), repo: repo.name };
+      writeReceipt(receiptPath(input.ticketId, repo.name, "upstream.json"), { tag: input.tag, sha });
+      return { pushed: true, tag: input.tag, sha, repo: repo.name, resumed: existing.includes(input.tag) };
+    },
+  }),
+
+  defineTool({
+    name: "get-repo-diff",
+    description: "Lit le diff du worktree contre sa base et les changements non commites, sans shell agent ni pilote de diff externe. Les fichiers permettent de poursuivre la lecture si un grand diff est tronque.",
+    inputSchema: obj({ ticketId: str("Cle Jira."), repo: str("Depot du registre."), paths: arr("Restreindre le diff a ces chemins relatifs.", str("Chemin relatif.")) }, ["ticketId", "repo"]),
+    handler: async ({ ticketId, repo: name, paths }: { ticketId: string; repo: string; paths?: string[] }) => {
+      const repo = findRepo(name);
+      const cwd = worktreePath(ticketId, repo.name);
+      const remote = (await gitAllowFailure(cwd, ["rev-parse", "--verify", `origin/${repo.baseBranch}`])).ok;
+      const base = remote ? `origin/${repo.baseBranch}` : repo.baseBranch;
+      return {
+        files: await changedFiles(cwd, base),
+        committed: await git(cwd, ["diff", "--no-ext-diff", "--no-textconv", `${base}...HEAD`, "--", ...(paths ?? [])]),
+        uncommitted: await git(cwd, ["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", ...(paths ?? [])]),
+      };
     },
   }),
 

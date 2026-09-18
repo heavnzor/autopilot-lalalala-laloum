@@ -16,7 +16,7 @@ import {
   queryNotes,
   writeNote,
 } from "../lib/memory.ts";
-import { autopilotHome, memoryDir } from "../lib/paths.ts";
+import { autopilotHome, memoryDir, ticketKey, ticketStatePath } from "../lib/paths.ts";
 import { arr, bool, enumOf, num, obj, str } from "../lib/schema.ts";
 import { patchTicketState } from "../lib/store.ts";
 import { type AnyTool, defineTool } from "../lib/tool.ts";
@@ -205,7 +205,12 @@ export const memoryTools: AnyTool[] = [
       const home = autopilotHome();
       await ensureAutopilotRepo(home);
 
-      await git(home, ["add", "--", "memory", "tickets"]);
+      const ticketFile = `tickets/${ticketKey(ticketId)}.yaml`;
+      const before = await git(home, ["diff", "--cached", "--name-only"]);
+      if (before.split("\n").some((file) => file && !file.startsWith("memory/") && file !== ticketFile)) {
+        fail("L'index memoire porte des fichiers d'un autre run.", "Termine ce commit avant de capitaliser ce ticket.");
+      }
+      await git(home, ["add", "--", "memory", ...(existsSync(ticketStatePath(ticketId)) ? [ticketFile] : [])]);
       const staged = await gitAllowFailure(home, ["diff", "--cached", "--name-only"]);
       if (!staged.output.trim()) {
         return { committed: false, reason: "Aucun changement memoire a commiter." };

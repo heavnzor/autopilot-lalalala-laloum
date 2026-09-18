@@ -4,7 +4,7 @@ import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { setFlaky } from "../fixtures/repos.ts";
-import { openRepo, runTests } from "./cycle.ts";
+import { openRepo, preparePublication, prepareUpstream, runTests } from "./cycle.ts";
 import { createSandbox } from "./harness.ts";
 
 function git(cwd: string, args: string[]): string {
@@ -29,11 +29,10 @@ describe("scenario 5 — boucle rouge", () => {
 
       // 10.4 : le developer corrige le code, et seulement le code.
       setFlaky(worktree, false);
-      await sandbox.call("create-commit", {
+      await sandbox.call("create-code-commit", {
         ticketId: "TJ-600",
         repo: "fixture-flaky",
         message: "fix: restore the expected answer\n\nRefs: TJ-600",
-        role: "developer",
       });
       await sandbox.call("write-store-ticket", {
         ticketId: "TJ-600",
@@ -63,11 +62,10 @@ describe("scenario 5 — boucle rouge", () => {
         "utf8",
       );
 
-      const refusal = await sandbox.expectFailure("create-commit", {
+      const refusal = await sandbox.expectFailure("create-code-commit", {
         ticketId: "TJ-610",
         repo: "fixture-flaky",
         message: "fix: adjust the test\n\nRefs: TJ-610",
-        role: "developer",
       });
       assert.match(refusal, /n'ecrit pas dans cette zone/);
 
@@ -84,11 +82,10 @@ describe("scenario 5 — boucle rouge", () => {
       const { worktree } = await openRepo(sandbox, { ticketId: "TJ-620", repo: "fixture-flaky", title: "Zone inverse" });
       writeFileSync(join(worktree, "src", "answer.js"), "export const answer = 1;\n", "utf8");
 
-      const refusal = await sandbox.expectFailure("create-commit", {
+      const refusal = await sandbox.expectFailure("create-test-commit", {
         ticketId: "TJ-620",
         repo: "fixture-flaky",
         message: "test: add coverage\n\nRefs: TJ-620",
-        role: "test-writer",
       });
       assert.match(refusal, /n'ecrit que des fichiers de test/);
     } finally {
@@ -237,12 +234,12 @@ describe("scenario 9 — echec en cours de route", () => {
       });
 
       writeFileSync(join(worktree, "src", "period.js"), "export function clamp(p) {\n  return p ?? '';\n}\n", "utf8");
-      const commit = await sandbox.call<any>("create-commit", {
+      const commit = await sandbox.call<any>("create-code-commit", {
         ticketId: "TJ-950",
         repo: "fixture-core",
         message: "feat: clamp the empty period\n\nRefs: TJ-950",
-        role: "developer",
       });
+      await prepareUpstream(sandbox, "TJ-950");
       await sandbox.call("push-tag", { ticketId: "TJ-950", repo: "fixture-core", tag: "v1.0.0-TJ-950-1" });
 
       await sandbox.call("escalate-to-human", {
@@ -277,6 +274,7 @@ describe("scenario 10 — allowlist slack", () => {
       slackUsers: { "a@example.com": "U1" },
     });
     try {
+      await preparePublication(sandbox, "ZZ-1");
       const channel = await sandbox.call<any>("create-slack-channel", { ticketId: "ZZ-1", title: "Une squad jamais vue" });
       const result = await sandbox.call<any>("invite-slack-users", { ticketId: "ZZ-1", channelId: channel.id });
 
@@ -299,6 +297,7 @@ describe("scenario 10 — allowlist slack", () => {
       slackUsers: { "a@example.com": "U1", "b@example.com": "U2", "intrus@ailleurs.fr": "U9" },
     });
     try {
+      await preparePublication(sandbox, "FT-1");
       const channel = await sandbox.call<any>("create-slack-channel", { ticketId: "FT-1", title: "Une squad connue" });
       const result = await sandbox.call<any>("invite-slack-users", { ticketId: "FT-1", channelId: channel.id });
 
@@ -316,6 +315,7 @@ describe("scenario 10 — allowlist slack", () => {
       slackUsers: { "a@example.com": "U1", "intrus@ailleurs.fr": "U9" },
     });
     try {
+      await preparePublication(sandbox, "FT-2");
       const channel = await sandbox.call<any>("create-slack-channel", { ticketId: "FT-2", title: "Tentative" });
       const refusal = await sandbox.expectFailure("invite-slack-users", {
         ticketId: "FT-2",
@@ -332,8 +332,10 @@ describe("scenario 10 — allowlist slack", () => {
   it("refuse de publier un message qui porte le marqueur @autopilot", async () => {
     const sandbox = await createSandbox({ ticket: { key: "FT-3", summary: "Boucle de retours" } });
     try {
+      await preparePublication(sandbox, "FT-3");
       const channel = await sandbox.call<any>("create-slack-channel", { ticketId: "FT-3", title: "Boucle" });
       const refusal = await sandbox.expectFailure("post-slack-message", {
+        ticketId: "FT-3",
         channelId: channel.id,
         text: "@autopilot relance le run",
       });

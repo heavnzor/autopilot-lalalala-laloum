@@ -7,7 +7,7 @@
   },
   "scripts": {
     "dev": "vite dev --host 127.0.0.1",
-    "demo": "node demo/seed.ts && vite dev --port 12781",
+    "demo": "node demo/start.ts",
     "start": "vite dev --host 127.0.0.1",
     "build": "vite build",
     "preview": "vite preview",
@@ -17,8 +17,8 @@
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.18",
-    "@tanstack/react-router": "latest",
-    "@tanstack/react-start": "latest",
+    "@tanstack/react-router": "1.170.36",
+    "@tanstack/react-start": "1.168.53",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^0.577.0",
@@ -41,12 +41,6 @@
     "@vitejs/plugin-react": "^6.0.1",
     "typescript": "^6.0.2",
     "vite": "^8.0.0"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "esbuild",
-      "lightningcss"
-    ]
   },
   "description": "Fenetre sur un run de l'autopilot. Jamais un pilote : si l'app meurt, le run continue."
 }

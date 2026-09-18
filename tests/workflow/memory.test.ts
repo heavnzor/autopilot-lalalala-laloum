@@ -73,6 +73,7 @@ describe("le cycle memoire", () => {
       });
 
       // Le memory-writer applique : une reecriture et une creation.
+      await sandbox.call("write-store-ticket", { ticketId: "TJ-1021", patch: { ticket: { title: "Autre run en cours" } } });
       await sandbox.call("write-memory", {
         path: PERIMEE.path,
         frontmatter: { type: "convention", scope: "repo", last_verified: "2026-09-15", repos: ["fixture-core"] },
@@ -100,6 +101,7 @@ describe("le cycle memoire", () => {
       const tracked = git(sandbox.home, ["ls-files"]).split("\n");
       assert.ok(tracked.some((file) => file.startsWith("memory/")), tracked.join(" "));
       assert.ok(tracked.some((file) => file.startsWith("tickets/")), tracked.join(" "));
+      assert.ok(!tracked.includes("tickets/TJ-1021.yaml"), "un commit memoire ne capture pas l'etat d'un autre ticket");
       assert.ok(!tracked.some((file) => file.startsWith("worktrees/")), "les worktrees ne sont jamais versionnes");
       assert.ok(!tracked.some((file) => file.startsWith("locks/")), "les locks ne sont jamais versionnes");
       assert.ok(existsSync(join(sandbox.home, ".gitignore")));
