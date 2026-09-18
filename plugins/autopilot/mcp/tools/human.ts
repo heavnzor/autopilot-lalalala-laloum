@@ -384,21 +384,36 @@ export const humanTools: AnyTool[] = [
       const port = await findFreePort(portRange[0], portRange[1]);
       const url = `http://127.0.0.1:${port}`;
 
-      const child = spawn("pnpm", ["run", "start", "--port", String(port)], {
+      const child = spawn("pnpm", ["run", "start", "--port", String(port), "--strictPort"], {
         cwd: directory,
         detached: true,
         stdio: "ignore",
         env: { ...process.env, PORT: String(port), AUTOPILOT_TICKET_ID: ticketId, AUTOPILOT_RUN_ID: runId },
       });
+      const spawned = await new Promise<boolean>((resolve) => {
+        child.once("spawn", () => resolve(true));
+        child.once("error", () => resolve(false));
+      });
+      if (!spawned || !child.pid || child.pid <= 1) {
+        return { launched: false, ready: false, url, note: "pnpm n'a pas pu demarrer le live shell. Verifie son installation et le PATH ; aucune session n'a ete enregistree." };
+      }
       child.unref();
 
-      const ready = await waitFor(url, 60_000);
-      writeLiveSession({ runId, ticketId, port, url, pid: child.pid ?? -1, startedAt: new Date().toISOString() });
-      reapWithSession(child.pid ?? null, ticketId);
+      const ready = await waitFor(url, 60_000, ticketId);
+      if (!ready) {
+        if (child.exitCode === null && child.signalCode === null) {
+          try { process.kill(-child.pid, "SIGTERM"); } catch { /* processus deja termine */ }
+        }
+        return { launched: false, ready: false, url, note: "Le live shell n'a pas repondu ; aucune session morte n'a ete enregistree." };
+      }
+      writeLiveSession({ runId, ticketId, port, url, pid: child.pid, startedAt: new Date().toISOString() });
+      reapWithSession(child.pid, ticketId);
       patchTicketState(ticketId, { run: { liveRunId: runId } });
 
       if (ready && openBrowser) {
-        spawn("open", [url], { detached: true, stdio: "ignore" }).unref();
+        const browser = spawn(process.platform === "darwin" ? "open" : "xdg-open", [url], { detached: true, stdio: "ignore" });
+        browser.on("error", () => { /* Un navigateur absent ne termine pas le run. */ });
+        browser.unref();
       }
 
       return {
@@ -772,10 +787,10 @@ async function isAlive(url: string, expectedTicket?: string): Promise<boolean> {
   }
 }
 
-async function waitFor(url: string, timeoutMs: number): Promise<boolean> {
+async function waitFor(url: string, timeoutMs: number, ticketId?: string): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (await isAlive(url)) return true;
+    if (await isAlive(url, ticketId)) return true;
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
   return false;
@@ -821,7 +836,7 @@ function truncate(text: string, max: number): string {
  * vite. Tuer le parent seul laisserait l'enfant qui ecoute le port.
  */
 function reapWithSession(pid: number | null, ticketId: string): void {
-  if (pid === null || reaping.has(pid)) return;
+  if (pid === null || !Number.isSafeInteger(pid) || pid <= 1 || reaping.has(pid)) return;
   reaping.add(pid);
 
   reapers.add(() => {

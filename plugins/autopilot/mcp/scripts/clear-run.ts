@@ -194,7 +194,7 @@ function remove(path: string): void {
   rmSync(path, { recursive: true, force: true });
 }
 
-if (live?.pid) {
+if (live && Number.isSafeInteger(live.pid) && live.pid > 1) {
   const alive = (() => {
     try {
       process.kill(live.pid, 0);
