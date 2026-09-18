@@ -126,16 +126,33 @@ describe("le chien de garde abat le groupe de processus", () => {
 
   it("ne laisse pas le petit-fils derriere lui", async () => {
     const marker = `orphelin-${process.pid}-${Date.now()}`;
-    await run(`node -e "process.title='${marker}'; setTimeout(()=>{}, 600000)" & sleep 600`, {
+    const result = await run(`node -e "process.title='${marker}'; console.log(process.pid); setTimeout(()=>{}, 600000)" & sleep 600`, {
       cwd: PROJECT_ROOT,
       timeoutMs: 60_000,
       silenceMs: 3_000,
     });
+    const pid = Number(result.stdout.trim());
+    assert.ok(Number.isSafeInteger(pid) && pid > 1, `PID de fixture invalide : ${result.stdout}`);
 
     // `SIGTERM` puis `SIGKILL` deux secondes plus tard : on laisse passer le delai.
     await new Promise((resolve) => setTimeout(resolve, 3_000));
-    const { execSync } = await import("node:child_process");
-    const alive = execSync(`pgrep -f ${marker} | wc -l`).toString().trim();
-    assert.equal(alive, "0", "un processus de test a survecu a l'abandon de sa commande");
+    // `pgrep -f marqueur | wc -l` comptait aussi son propre shell sous Linux.
+    // On sonde le PID reel. Un zombie attend son parent adoptif mais n'execute
+    // plus rien et ne tient plus les tubes : ce n'est pas un runner survivant.
+    let alive = false;
+    if (process.platform === "linux") {
+      const { readFileSync } = await import("node:fs");
+      try {
+        const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+        const state = stat.slice(stat.lastIndexOf(")") + 1).trimStart()[0];
+        alive = state !== "Z" && state !== "X";
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    } else {
+      try { process.kill(pid, 0); alive = true; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+    }
+    assert.equal(alive, false, `le processus de test ${pid} a survecu a l'abandon de sa commande`);
   });
 });
