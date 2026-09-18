@@ -1,4 +1,26 @@
-# autopilot
+# autopilot lalalala laloum
+
+[![CI](https://github.com/heavnzor/autopilot-lalalala-laloum/actions/workflows/ci.yml/badge.svg)](https://github.com/heavnzor/autopilot-lalalala-laloum/actions/workflows/ci.yml)
+
+An independently maintained, hardened derivative of
+[Elie Laloum's autopilot](https://gitlab.com/e.laloum/autopilot), based on upstream
+commit `869d631`. The original MIT license and Git history are preserved.
+
+## What this version adds
+
+- Publication checks enforced by the server: approved contract, completed repositories,
+  passing checklists and full checks tied to the current clean Git commit.
+- Deterministic routing of agent verdicts and loop budgets through `advance-workflow`.
+- Lossless incremental arbitration storage and inter-process state-write serialization.
+- Fixed-role code/test commit tools, checked command arguments and strict CI job verdicts.
+- Durable publication receipts, bounded HTTP retries and resumable same-commit tag pushes.
+- A shared event contract and corrected live-shell handling of retries and backward steps.
+- One pnpm workspace, reproducible installation, a disposable demo and GitHub Actions.
+
+See [architecture and boundaries](docs/ARCHITECTURE.md),
+[migration from upstream](docs/MIGRATION.md) and the [changelog](CHANGELOG.md).
+
+## The workflow
 
 An autonomous development workflow for [Claude Code](https://claude.com/claude-code). It takes
 a Jira ticket and carries it to merge requests: scoping, one human gate, adversarial TDD
@@ -20,13 +42,14 @@ On a ticket that already has a state file, the command **resumes** instead of st
 ## The three ideas that carry the rest
 
 **Any action performed on every run, the same way, is a tool — not an agent instruction.** A
-tool is deterministic, testable, and costs no context. That is why there are 59 of them, and
-why most of the surface area can be tested without an LLM in the loop.
+tool makes its implementation deterministic and testable. Its schema and results still
+consume context; the gain is avoiding repeated procedural reasoning. Most of the surface
+area can be tested without an LLM in the loop.
 
-**An agent may only write to one zone.** The `test-writer` writes tests, the `developer`
-writes code and never a test, the two adversaries write nothing, the `memory-writer` is alone
-in `memory/`, the `finalizer` is alone on a remote. An agent that needed two zones would be
-badly cut.
+**Each agent has a narrow responsibility.** The `test-writer` commits tests through its
+dedicated tool; the `developer` commits production code through another. Adversaries have
+read-only tools, `memory-writer` handles knowledge, and `finalizer` performs guarded
+publication. These workflow boundaries do not replace an operating-system sandbox.
 
 **Contradicting the memory is a permitted outcome.** The scouts and the `developer` are given
 a `contradict-memory` tool for when what they read does not match the actual code. That is the
@@ -53,11 +76,14 @@ end.
 | 11-12 | `memory-planner`, `memory-writer` | the memory plan, a single commit |
 | 13 | `finalizer` | N cross-referenced MRs, one channel, one transition |
 
-Once step 9 is approved, everything after it runs without further validation — including the
-public, irreversible actions of step 13. The only interruptions left are escalations.
+Once step 9 is approved, the workflow proceeds automatically. Publication tools independently
+check that the approved contract still matches and that current commits passed full checks.
+Claude Code's own tool permission policy also applies; the example permission file documents
+the initial allowlist. Operational failures and unknown remote outcomes are escalated.
 
-**Step 10.3 exists for exactly one reason**: it is the only guard against a test that passes
-for the wrong reason. Those tests are green at the end, and therefore invisible forever.
+**Step 10.3 checks sensitivity to the new behavior**: a test intended to demonstrate a
+missing behavior should fail before implementation. Existing-behavior regression tests may
+already pass; a new API may first need its minimal interface scaffold.
 
 ## Where things live
 
@@ -73,8 +99,10 @@ autopilot/
 │   └── evals/                  one eval suite per agent
 ├── tools/live-shell/           the live-mode app, tanstack start in ssr
 │   ├── DESIGN.md               its design system, derived from what shipped
+│   ├── PRODUCT.md              purpose and intended users of the live shell
 │   └── .impeccable/            the design pass that produced it
-├── PRODUCT.md                  what the live shell is for, and for whom
+├── shared/                     event and JSON contracts used on both sides
+├── docs/                       architecture and migration notes
 └── tests/                      unit/, workflow/, fixtures/
 ```
 
@@ -93,6 +121,7 @@ anything has been configured.
 ├── tickets/<ticket-id>.yaml      the tracking state, versioned
 ├── events/<ticket-id>.jsonl      the live-mode stream, disposable
 ├── locks/<ticket-id>             the run lock, disposable
+├── receipts/<ticket-id>/          tool-produced approvals, checks and publication journal
 └── worktrees/<ticket-id>/<repo>/ the worktrees, disposable
 ```
 
@@ -102,7 +131,9 @@ what gets versioned is what still has value after the run.
 ## Requirements
 
 - **Node 22.18+** — the tool server runs TypeScript natively, with no build step.
-- **Claude Code**, which loads this repository as a local plugin marketplace.
+- **pnpm 10.17.1**, the package-manager version declared by the workspace.
+- **macOS or Linux** — command cleanup uses POSIX process groups.
+- **Claude Code**, loading the local plugin directory from this checkout.
 - **Jira Cloud**, **GitLab**, **Slack** — with a personal access token for each.
 - **Figma** is optional. Without a token the `get-figma-*` tools report "no mockup" and the run
   continues; many tickets have none.
@@ -113,15 +144,29 @@ thing — a colleague seeing that *you* opened the channel — falls away.
 
 ## Install
 
-```
-pnpm install
+```sh
+pnpm install --frozen-lockfile
 cp .env.example .env                                # then fill in the tokens
 cp autopilot.example.yaml autopilot.yaml            # budgets, naming, allowlist
 cp repositories.example.yaml repositories.yaml      # your repositories
 cp plugins/autopilot/rules/voice.template.md \
    plugins/autopilot/rules/voice.md                 # your writing voice — see below
 pnpm config:check
+claude --plugin-dir ./plugins/autopilot
 ```
+
+This source-checkout command loads the code and dependencies you just installed. The
+internal plugin name remains `autopilot`, so `/autopilot-start` and the MCP tool prefix
+remain familiar. Follow [migration notes](docs/MIGRATION.md) when replacing an installed copy.
+
+To inspect the live shell without configuring services:
+
+```sh
+pnpm demo
+```
+
+The demo uses a fresh temporary data directory, prints its local URL and cleans up on exit.
+It does not use the real `~/.autopilot` directory.
 
 `pnpm config:check` is the one command to run after any configuration change: it reads the
 config, the registry and the environment, and reports what would break a run far from its
@@ -129,7 +174,8 @@ cause — an unreadable setting, an incoherent registry, a missing token.
 
 ## Adapting it to your own stack
 
-Almost all of the adaptation happens in `repositories.yaml`, and none of it in code.
+For npm/pnpm/yarn codebases using Jira, GitLab and Slack, most adaptation happens in
+`repositories.yaml`. Other package managers or forges require additional adapters.
 
 **Declare each repository** with its `level`, its local path, its GitLab project, its base
 branch and its dependencies. `level` carries the processing order: an upstream repository has a
@@ -206,10 +252,15 @@ will publish something you would not have written.
 
 | Command | What it answers |
 |---|---|
-| `pnpm test` | is this **function** correct? 160 tests |
-| `pnpm test:workflow` | does the **chain** hold end to end? 12 scenarios in a sandbox |
+| `pnpm verify` | TypeScript, unit tests, workflow tests and live-shell build |
+| `pnpm test` | deterministic functions, transport and boundary regressions |
+| `pnpm test:workflow` | tool integration, routing and publication preconditions in a sandbox |
 | `pnpm eval` | does this **agent** judge well? one suite per agent |
 | `pnpm typecheck` | — |
+
+GitHub Actions runs the deterministic checks on Node 22.18 and Node 24. The integration
+suite uses real Git repositories and local fake services. It does not establish a success
+rate for real Claude runs; the separate evals and real-ticket measurements serve that purpose.
 
 There is **no** `--dry-run` in autopilot: the `tests/workflow/` sandbox replaces it, and
 replaces it better. A flag can be bypassed and verifies nothing; a sandbox verifies what
