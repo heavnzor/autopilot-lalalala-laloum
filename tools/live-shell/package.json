@@ -17,8 +17,8 @@
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.18",
-    "@tanstack/react-router": "1.170.36",
-    "@tanstack/react-start": "1.168.53",
+    "@tanstack/react-router": "1.170.40",
+    "@tanstack/react-start": "1.168.59",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^0.577.0",
@@ -29,18 +29,18 @@
     "tw-animate-css": "^1.3.6",
     "valibot": "^1.1.0",
     "yaml": "^2.8.0",
-    "@tanstack/react-query": "^5.90.2"
+    "@tanstack/react-query": "^5.104.0"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.4.5",
+    "@biomejs/biome": "2.5.14",
     "@tailwindcss/typography": "^0.5.16",
-    "@tanstack/router-cli": "^1.132.0",
+    "@tanstack/router-cli": "^1.167.39",
     "@types/node": "^22.10.2",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^6.0.1",
     "typescript": "^6.0.2",
-    "vite": "^8.0.0"
+    "vite": "^8.3.1"
   },
   "description": "Fenetre sur un run de l'autopilot. Jamais un pilote : si l'app meurt, le run continue."
 }
